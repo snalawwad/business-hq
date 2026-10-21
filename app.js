@@ -213,8 +213,54 @@
     return `<div>${av(a.actor)}<span style="flex:1"><b>${w}</b> ${ACTION[a.action] || esc(a.action)} ${KIND[a.kind] ? KIND[a.kind] + ' ' : ''}<b>${esc(a.title)}</b>${a.detail ? ` <span class="muted">· ${esc(a.detail)}</span>` : ''}</span><time datetime="${esc(a.at)}">${ago(a.at)}</time></div>`;
   }
 
+
+  /* ---------- visual helpers ---------- */
+  const ICONS = {
+    today: '<rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4M8 14l2.5 2.5L16 12"/>',
+    team: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.5a3.5 3.5 0 0 1 0 7M18 14a6 6 0 0 1 3.5 6"/>',
+    plan: '<path d="M4 6h10M4 12h16M4 18h7"/><circle cx="18" cy="6" r="2"/><circle cx="15" cy="18" r="2"/>',
+    money: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/>',
+    expenses: '<rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M2.5 10h19M6 15h4"/>',
+    orders: '<path d="M6 7h12l-1 13H7z"/><path d="M9 7a3 3 0 0 1 6 0"/>',
+    pricing: '<path d="M20 12l-8 8-9-9V3h8z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
+    drop: '<path d="M8 3l4 3 4-3 4 4-3 3v11H7V10L4 7z"/>',
+    brand: '<path d="M12 3l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.4 6.8 19.2l1-5.9L3.5 9.2l5.9-.8z"/>',
+    instagram: '<rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r=".6"/>',
+    expos: '<path d="M3 21V9l9-6 9 6v12"/><path d="M9 21v-6h6v6"/>',
+    suppliers: '<path d="M3 7h13v10H3zM16 10h3l2 3v4h-5"/><circle cx="7" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'
+  };
+  const ARR = '<svg class="arr" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17L17 7M8 7h9v9"/></svg>';
+  // tiles: [{t, v, d}] — first tile dark
+  const tiles = list => `<div class="tiles">${list.map((x, i) => `<div class="tile ${i === 0 ? 'dark' : ''}"><div class="t">${x.t}</div><div class="d">${x.dir ? `<span class="tri ${x.dir}">${x.dir === 'up' ? '▲' : '▼'}</span>` : ''}${x.d || '&nbsp;'}</div><div class="v">${x.v}</div>${ARR}</div>`).join('')}</div>`;
+  function areaChart(series, labels, fmt) {
+    // series: [{name, color, fill, values:[]}]
+    const W = 640, H = 230, L = 52, R = 12, T = 16, B = 30, n = labels.length;
+    const max = Math.max(1, ...series.flatMap(s => s.values)) * 1.15;
+    const X = i => L + (n <= 1 ? 0 : i * (W - L - R) / (n - 1)), Y = v => T + (H - T - B) * (1 - v / max);
+    const path = vals => vals.map((v, i) => { if (!i) return `M${X(0)} ${Y(v)}`; const x0 = X(i - 1), x1 = X(i), cx = (x0 + x1) / 2; return `C${cx} ${Y(vals[i - 1])} ${cx} ${Y(v)} ${x1} ${Y(v)}`; }).join(' ');
+    const ticks = [0, .25, .5, .75, 1].map(f => max / 1.15 * f);
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(series.map(s => s.name).join(' and '))} over time">
+      ${ticks.map(t => `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}" stroke="#E2E2E7"/><text x="${L - 10}" y="${Y(t) + 4}" text-anchor="end" font-size="11" fill="#8A8A94">${esc(fmt(t))}</text>`).join('')}
+      ${labels.map((l, i) => (n <= 8 || i % Math.ceil(n / 8) === 0) ? `<text x="${X(i)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="#8A8A94">${esc(l)}</text>` : '').join('')}
+      ${series.map(s => s.fill ? `<path d="${path(s.values)} L${X(n - 1)} ${Y(0)} L${X(0)} ${Y(0)}Z" fill="${s.fill}"/>` : '').join('')}
+      ${series.map(s => `<path d="${path(s.values)}" fill="none" stroke="${s.color}" stroke-width="2"/>`).join('')}
+      ${(() => { const s = series.find(x => x.fill) || series[0]; const m = Math.max(...s.values); if (!m) return ''; const i = s.values.indexOf(m), x = X(i), y = Y(m), lab = fmt(m), w = 12 + lab.length * 8; return `<rect x="${x - w / 2}" y="${y - 30}" width="${w}" height="22" rx="11" fill="#232326"/><text x="${x}" y="${y - 15}" text-anchor="middle" font-size="12" fill="#fff" font-family="Urbanist, sans-serif">${esc(lab)}</text>`; })()}
+    </svg>`;
+  }
+  function donut(parts, center, sub) {
+    const R = 70, C = 2 * Math.PI * R, tot = Math.max(1e-9, parts.reduce((a, p) => a + p.v, 0)); let off = 0;
+    return `<svg viewBox="0 0 200 200" width="100%" style="max-width:220px" role="img" aria-label="${esc(sub)}">
+      <circle cx="100" cy="100" r="${R}" fill="none" stroke="#E2E2E7" stroke-width="18"/>
+      ${parts.map(p => { const len = C * p.v / tot, el = `<circle cx="100" cy="100" r="${R}" fill="none" stroke="${p.c}" stroke-width="18" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 100 100)"/>`; off += len; return el; }).join('')}
+      <text x="100" y="102" text-anchor="middle" font-size="30" fill="#1E1E21" font-family="Urbanist, sans-serif">${esc(center)}</text>
+      <text x="100" y="126" text-anchor="middle" font-size="13" fill="#6E6E78" font-family="Urbanist, sans-serif">${esc(sub)}</text></svg>`;
+  }
+  const short = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(Math.round(n));
+
   /* ============================ views ============================ */
-  const ph = (t, s) => `<div class="ph"><h1>${esc(t)}</h1>${s ? `<p>${s}</p>` : ''}</div>`;
+  const ph = (t, s) => { const g = NAV.find(x => x[1].some(p => p[0] === S.page)); return `<div class="ph"><div class="phrow"><h1>${esc(t)}</h1><label class="search"><input type="search" id="q" placeholder="Search" aria-label="Search this page" value="${esc(S.q || '')}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.8-4.8"/></svg></label></div>
+    <div class="tabs ptabs" role="group" aria-label="${esc(g[0])}">${g[1].map(p => `<button class="tab" data-tab="${p[0]}" aria-pressed="${p[0] === S.page}">${esc(p[1])}</button>`).join('')}</div>${s ? `<p class="sub">${s}</p>` : ''}</div>`; };
   const greet = () => { const h = Number(new Date().toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'Asia/Kuwait' })); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 
   function taskCard(t, mine) {
@@ -227,8 +273,18 @@
     const d = S.d, mine = d.todayList, open = mine.filter(t => !t.done), done = mine.filter(t => t.done);
     const all = d.tasks.length, allDone = d.tasks.filter(t => t.done).length, toR = daysBetween(today(), RAMADAN);
     const notes = pmNotes();
-    return ph(`${greet()}, ${nameOf(S.me)}.`, `${toR > 0 ? `${toR} days to Ramadan (around ${day(RAMADAN)})` : 'Ramadan Kareem'} · launch plan ${Math.round(allDone / Math.max(1, all) * 100)}% done`) +
-      `<div class="grid g2" style="align-items:start">
+    const myW = weekStats(S.me);
+    const team = (d.members.length ? d.members : [{ email: S.me }]);
+    return ph(`${greet()}, ${nameOf(S.me)}`, `${toR > 0 ? `${toR} days to Ramadan` : 'Ramadan Kareem'} · ${day(today())}`) +
+      `<div class="split"><div>${tiles([
+        { t: 'Your tasks today', v: `${done.length}/${mine.length || 0}`, d: open.length ? `${open.length} left to do` : 'All done for today', dir: done.length ? 'up' : 'dn' },
+        { t: 'Launch plan', v: Math.round(allDone / Math.max(1, all) * 100) + '%', d: `${allDone} of ${all} tasks` },
+        { t: 'Done this week', v: String(myW.doneWeek), d: 'by you', dir: myW.doneWeek ? 'up' : 'dn' },
+        { t: 'Days to Ramadan', v: String(Math.max(0, toR)), d: 'around ' + day(RAMADAN) }
+      ])}</div>
+      <div><h2 style="margin-top:-4px">Team</h2><div class="card" style="padding:10px 22px">${team.map(m => { const ws = weekStats(m.email); return `<div class="person">${av(m.email)}<div><b>${isMe(m.email) ? 'You' : esc(nameOf(m.email))}</b><span>${ws.doneToday} done today · ${ws.lastSeen ? 'active ' + ago(ws.lastSeen) : 'not active yet'}</span></div></div>`; }).join('')}
+        <button class="btn lav" data-go="team" style="width:100%;margin:10px 0 12px">See activity</button></div></div></div>
+      <div class="split sec">
         <div><h2>Your tasks today</h2><div class="list" style="display:flex;flex-direction:column;gap:8px">
           ${open.length ? open.map(t => taskCard(t, true)).join('') : `<div class="empty">${allDone === all ? 'Every launch task is done.' : 'Nothing left for today. New tasks load when you finish your batch.'}</div>`}
           ${done.map(t => taskCard(t, true)).join('')}
@@ -274,10 +330,27 @@
   const styleName = id => (S.d.styles.find(s => s.id === Number(id)) || {}).name || '';
   function vMoney() {
     const s = S.d.summary || {}, used = Math.min(100, num(s.budget_used) * 100), max = Math.max(1, ...S.d.spend.map(c => num(c.spent))), spend = S.d.spend.filter(c => num(c.spent) > 0);
-    return ph('Money', 'Calculated by the database whenever either of you adds an expense or order.') +
-      `<div class="grid g4"><div class="card kpi"><div class="n">${kd(s.spent)}</div><div class="l">Spent of ${kd(s.budget)}</div></div><div class="card kpi"><div class="n">${kd(s.revenue)}</div><div class="l">Revenue · ${num(s.orders)} order${num(s.orders) === 1 ? '' : 's'}</div></div><div class="card kpi"><div class="n">${kd(s.profit)}</div><div class="l">Profit on sales</div></div><div class="card kpi"><div class="n">${kd(s.owed)}</div><div class="l">Still owed by customers</div></div></div>
-      <div class="grid g2" style="margin-top:14px"><div class="card"><h2>Budget</h2><div class="meter"><i style="width:${used}%;background:${used > 90 ? 'var(--bad)' : 'var(--accent)'}"></i></div><p class="small muted" style="margin:10px 0 0">${kd(s.budget_left)} left · ${pct(s.budget_used)} used · ${kd(s.collected)} collected in deposits</p><p class="small" style="margin:8px 0 0">${s.sets_to_break_even != null ? (num(s.net_position) >= 0 ? 'You’ve earned back everything you’ve spent.' : `About <b>${s.sets_to_break_even}</b> more sets to earn back what you’ve spent.`) : 'Log a sale to see your break-even point.'}</p></div>
-      <div class="card"><h2>Where the money went</h2>${spend.length ? spend.map(c => `<div class="hbar"><span class="small">${esc(c.category)}</span><div class="meter" style="height:10px"><i style="width:${num(c.spent) / max * 100}%;background:${c.kind === 'per_set' ? 'var(--accent)' : 'var(--gold)'}"></i></div><span class="small" style="text-align:right">${kd(c.spent)}</span></div>`).join('') + '<p class="small muted" style="margin:8px 0 0">Black = cost of the sets · gold = overheads</p>' : '<p class="muted small">Appears once you log expenses.</p>'}</div></div>
+    const exs = S.d.expenses, ords = S.d.orders.filter(o => o.status !== 'Cancelled');
+    const dates = exs.map(e => e.spent_on).concat(ords.map(o => o.ordered_on)).filter(Boolean).sort();
+    let flow = '';
+    if (dates.length) {
+      const start = Date.parse(dates[0]), end = Math.max(Date.parse(today()), start + 7 * 864e5), weeks = Math.min(12, Math.max(2, Math.ceil((end - start) / (7 * 864e5)) + 1));
+      const pts = Array.from({ length: weeks }, (_, i) => new Date(start + i * 7 * 864e5).toISOString().slice(0, 10));
+      const cum = (arr, key, val) => pts.map(p => arr.filter(x => x[key] <= p).reduce((a, x) => a + num(x[val]), 0));
+      flow = areaChart([{ name: 'Spent', color: '#1E1E21', values: cum(exs, 'spent_on', 'amount') }, { name: 'Revenue', color: '#8B7CF0', fill: 'rgba(214,205,250,.6)', values: cum(ords, 'ordered_on', 'order_total') }], pts.map(day), short);
+    }
+    return ph('Money', 'Updated by the database whenever either of you adds an expense or order') +
+      `<div class="split"><div>${tiles([
+        { t: 'Spent so far', v: kd(s.spent), d: `${pct(s.budget_used) === '—' ? '0%' : pct(s.budget_used)} of ${kd(s.budget)} budget`, dir: num(s.budget_used) > .9 ? 'dn' : 'up' },
+        { t: 'Revenue', v: kd(s.revenue), d: `${num(s.orders)} order${num(s.orders) === 1 ? '' : 's'} · ${num(s.sets_sold)} sets` },
+        { t: 'Profit on sales', v: kd(s.profit), dir: num(s.profit) > 0 ? 'up' : 'dn', d: s.sets_to_break_even != null ? (num(s.net_position) >= 0 ? 'Spend earned back' : `${s.sets_to_break_even} sets to break even`) : 'No sales yet' },
+        { t: 'Still owed', v: kd(s.owed), d: num(s.collected) ? `${kd(s.collected)} collected` : "Nothing collected yet" }
+      ])}</div>
+      <div><h2 style="margin-top:-4px">Budget</h2><div class="card" style="text-align:center">${donut([{ v: Math.min(num(s.spent), num(s.budget) || num(s.spent)), c: '#1E1E21' }, { v: Math.max(0, num(s.budget_left)), c: '#D6CDFA' }], pct(s.budget_used) === '—' ? '0%' : pct(s.budget_used), 'used')}
+        <div class="row" style="justify-content:space-around;margin-top:8px"><div><div style="font-size:20px">${kd(s.spent)}</div><div class="cap">Spent</div></div><div><div style="font-size:20px">${kd(s.budget_left)}</div><div class="cap">Left</div></div></div></div></div></div>
+      <div class="split sec"><div><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Cash flow</h2><div class="legend"><span><i style="background:#1E1E21"></i>Spent</span><span><i style="background:#8B7CF0"></i>Revenue</span></div></div>
+        <div class="chart">${flow || '<p class="muted" style="padding:40px 0;text-align:center;margin:0">Appears once you log expenses or orders.</p>'}</div></div>
+      <div><h2>Where it went</h2><div class="card">${spend.length ? spend.map(c => `<div class="hbar"><span class="small">${esc(c.category)}</span><div class="meter" style="height:8px"><i style="width:${num(c.spent) / max * 100}%;background:${c.kind === 'per_set' ? '#1E1E21' : '#8B7CF0'}"></i></div><span class="small" style="text-align:right">${kd(c.spent)}</span></div>`).join('') + '<p class="cap" style="margin:10px 0 0">Black = set costs · lilac = overheads</p>' : '<p class="muted small" style="margin:0">Appears once you log expenses.</p>'}</div></div></div>
       <div class="sec"><h2>Prices right now</h2><div class="grid g5">${S.d.pricing.map(p => `<div class="card"><h3>${esc(p.name)}</h3><div style="font-family:var(--serif);font-size:30px;line-height:1.1">${num(p.final_price) ? kd(p.final_price) : '—'}</div><p class="small muted" style="margin:4px 0 8px">${num(p.final_price) ? `Cost ${kd(p.full_cost)} · margin ${pct(p.margin)}` : `Target ${num(p.target_price)} KD`}</p>${band(p)}</div>`).join('')}</div></div>`;
   }
   function vExpenses() {
@@ -433,19 +506,21 @@ const DROP=[
 
   /* ============================ shell ============================ */
   function navHtml(open) {
-    return NAV.map(g => `<div class="grp">${g[0]}</div>` + g[1].map(p => `<button data-tab="${p[0]}" ${p[0] === S.page ? 'aria-current="page"' : ''}>${p[1]}${p[0] === 'today' && open ? `<span class="badge">${open}</span>` : ''}</button>`).join('')).join('');
+    return NAV.map(g => `<div class="grp">${g[0]}</div>` + g[1].map(p => `<button data-tab="${p[0]}" ${p[0] === S.page ? 'aria-current="page"' : ''}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[p[0]] || ''}</svg>${p[1]}${p[0] === 'today' && open ? `<span class="badge">${open}</span>` : ''}</button>`).join('')).join('');
   }
   function render() {
     if (!S.d) return;
     const st = S.d.settings, open = S.d.todayList.filter(t => !t.done).length;
-    const logo = `<div class="logo"><i aria-hidden="true">${esc(String(st.brand_name || 'D').slice(0, 1))}</i><div><b>${esc(st.brand_name || CFG.BRAND_NAME || 'Business HQ')}</b><small>Business HQ</small></div></div>`;
-    const who = DEMO ? '<span class="pill gold">Demo mode</span>' : `<span class="dot ${S.live ? 'live' : ''}" aria-hidden="true"></span>${esc(S.me || '')}`;
+    const logo = `<div class="logo"><i aria-hidden="true">${esc(String(st.brand_name || 'D').slice(0, 1).toLowerCase())}</i><div><b>${esc(String(st.brand_name || 'Business HQ').toLowerCase())}</b><small>Business HQ</small></div></div>`;
+    const who = `<div class="big" aria-hidden="true">${esc(nameOf(S.me).slice(0, 1).toUpperCase())}</div><b>${esc(nameOf(S.me))}</b><span>${DEMO ? 'Demo mode' : esc(S.me || '')}</span>${DEMO ? '' : `<span style="text-transform:none;letter-spacing:0"><i class="dot ${S.live ? 'live' : ''}"></i> ${S.live ? 'Live' : 'Connecting'}</span>`}`;
     const y = window.scrollY;
     $app.innerHTML = `<div class="app"><aside>${logo}<nav aria-label="Sections">${navHtml(open)}</nav><div class="who">${who}</div></aside>
       <div class="wrap"><div class="mob"><div class="top">${logo}<span style="margin-left:auto" class="small muted">${DEMO ? 'Demo' : ''}</span></div><nav aria-label="Sections">${navHtml(open)}</nav></div>
       <main>${DEMO ? '<div class="banner">Demo mode: saved in this browser only, and you play both roles. Add your Supabase details to <b>config.js</b> to share it with your partner (see README).</div>' : ''}${VIEWS[S.page]()}</main></div></div>`;
     window.scrollTo(0, y);
+    applySearch();
   }
+  function applySearch() { const q = (S.q || '').trim().toLowerCase(); document.querySelectorAll('main tbody tr, main .task, main .feed > div, main .note, main .grid > .card').forEach(el => { el.style.display = !q || el.textContent.toLowerCase().includes(q) ? '' : 'none'; }); }
   function renderLogin(msg) {
     $app.innerHTML = `<div class="auth"><h1>${esc(CFG.BRAND_NAME || 'Business HQ')}</h1><p class="muted">Sign in with your email and we’ll send you a link.</p><div class="form" style="grid-template-columns:1fr;text-align:left;margin-top:22px"><div class="field"><label for="l-email">Email</label><input type="email" id="l-email" autocomplete="email"></div><button class="btn solid" data-act="login">Email me a sign-in link</button></div>${msg ? `<p class="small" style="margin-top:14px">${msg}</p>` : ''}</div>`;
   }
@@ -510,15 +585,17 @@ const DROP=[
       case 'chosen': run(API.upd('suppliers', id, { chosen: el.checked }), 'Saved'); break;
     }
   });
+  document.addEventListener('input', e => { if (e.target.id === 'q') { S.q = e.target.value; applySearch(); } });
   document.addEventListener('focusout', () => setTimeout(() => { const a = document.activeElement; if (S.dirty && !(a && a.closest && a.closest('.form'))) { S.dirty = false; render(); } }, 0));
   document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'l-email') document.querySelector('[data-act="login"]').click(); if (e.key === 'Enter' && e.target.id && e.target.id.startsWith('nt-')) { const btn = e.target.parentNode.querySelector('[data-act="addTask"]'); if (btn) btn.click(); } });
 
   /* ============================ start ============================ */
   async function start() {
     if (DEMO) { S.me = 'you@demo'; await refresh({ force: true }); return; }
-    sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
+    sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY, { auth: { flowType: 'implicit', detectSessionInUrl: true, persistSession: true, autoRefreshToken: true } });
     const { data } = await sb.auth.getSession();
     const user = data.session && data.session.user; S.me = user && user.email;
+    if (user && /access_token|refresh_token|type=magiclink/.test(location.hash)) { try { history.replaceState(null, '', location.pathname + '#today'); } catch (_) { } }
     sb.auth.onAuthStateChange((_e, session) => { const em = session && session.user && session.user.email; if (em !== S.me) location.reload(); });
     if (!S.me) { renderLogin(); return; }
     await refresh({ force: true });
