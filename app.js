@@ -13,12 +13,13 @@
   const SUP_TYPES = ['Tailor', 'Fabric', 'Embroidery', 'Labels & packaging', 'Photographer', 'Exhibition organizer', 'Delivery', 'Other'];
   const POST_TYPES = { announce: ['Announcement', '#6E1F18'], product: ['Product', '#4B4A2B'], detail: ['Detail', '#4A2C24'], quote: ['Quote', '#16100E'], bts: ['Behind the scenes', '#A6814A'], offer: ['Offer', '#6E1F18'] };
   const NAV = [
-    ['Your day', [['today', 'Today'], ['team', 'Team activity'], ['plan', 'Launch plan']]],
-    ['Money', [['money', 'Overview'], ['expenses', 'Expenses'], ['orders', 'Orders'], ['pricing', 'Pricing']]],
-    ['Product', [['drop', 'Ramadan drop'], ['brand', 'Brand'], ['instagram', 'Instagram']]],
+    ['Your day', [['today', 'Today'], ['plan', 'Launch plan']]],
+    ['Money', [['money', 'Overview'], ['expenses', 'Expenses'], ['orders', 'Orders']]],
+    ['Product', [['drop', 'Ramadan drop'], ['stock', 'Inventory'], ['kit', 'Brand kit'], ['instagram', 'Instagram']]],
     ['Selling', [['expos', 'Exhibitions'], ['suppliers', 'Suppliers'], ['settings', 'Settings']]]
   ];
-  const PAGES = NAV.flatMap(g => g[1].map(p => p[0]));
+  const PAGES = NAV.flatMap(g => g[1].map(p => p[0])).concat(['team', 'pricing']);
+  const ALIAS = { team: 'today', pricing: 'money' };
 
   const $app = document.getElementById('app');
   const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -34,7 +35,7 @@
   const opt = (arr, sel) => arr.map(v => Array.isArray(v) ? `<option value="${esc(v[0])}"${String(v[0]) === String(sel == null ? '' : sel) ? ' selected' : ''}>${esc(v[1])}</option>` : `<option${v === sel ? ' selected' : ''}>${esc(v)}</option>`).join('');
   function toast(t) { const el = document.getElementById('toast'); el.textContent = t; el.classList.add('on'); clearTimeout(toast._t); toast._t = setTimeout(() => el.classList.remove('on'), 2400); }
 
-  const S = { page: PAGES.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'today', me: null, live: false, d: null, busy: false, ef: {}, of: {}, ui: { drop: 0, ig: 'grid', post: 1, feed: 'all' }, lastOpen: null };
+  const S = { page: PAGES.includes(location.hash.slice(1)) ? ({ team: 'today', pricing: 'money' }[location.hash.slice(1)] || location.hash.slice(1)) : 'today', me: null, live: false, d: null, busy: false, ef: {}, of: {}, ui: { drop: 0, ig: 'grid', post: 1, feed: 'all' }, lastOpen: null };
 
   /* ============================ Supabase ============================ */
   let sb = null;
@@ -51,8 +52,19 @@
       const bad = res.find(r => r.error); if (bad) throw bad.error;
       if (!res[0].data) throw { code: 'not_member' };
       const [settings, styles, categories, members, phases, tasks, expenses, pricing, orders, summary, spend, expos, checklist, suppliers, posts, activity] = res.map(r => r.data);
-      return { settings, styles, categories, members, phases, tasks, expenses, pricing, orders, summary, spend, expos, checklist, suppliers, posts, activity, todayList: pull.data || [] };
+      let reviews = [], stock = []; try { const r1 = await sb.from('weekly_reviews').select('*').order('week_start', { ascending: false }); if (!r1.error) reviews = r1.data || []; const r2 = await sb.from('stock').select('*'); if (!r2.error) stock = r2.data || []; } catch (_) { }
+      let assets = []; try { const a = await sb.from('assets').select('*').order('created_at', { ascending: false }); if (!a.error) assets = a.data || []; else S.noKit = true; } catch (_) { S.noKit = true; }
+      return { settings, styles, categories, members, phases, tasks, expenses, pricing, orders, summary, spend, expos, checklist, suppliers, posts, activity, assets, reviews, stock, todayList: pull.data || [] };
     },
+    async upload(slot, file) {
+      const safe = file.name.replace(/[^A-Za-z0-9._-]+/g, '-').slice(-80), path = `${slot}/${Date.now()}-${safe}`;
+      const up = await sb.storage.from('brand').upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+      if (up.error) return up;
+      return sb.from('assets').insert({ slot, name: file.name, path, mime: file.type || '', size: file.size });
+    },
+    setStock: (style_id, size, color, qty) => sb.from('stock').upsert({ style_id, size, color, qty, updated_at: new Date().toISOString() }, { onConflict: 'style_id,size,color' }),
+    async removeAsset(a) { await sb.storage.from('brand').remove([a.path]); return sb.from('assets').delete().eq('id', a.id); },
+    async urls(paths) { if (!paths.length) return {}; const r = await sb.storage.from('brand').createSignedUrls(paths, 3600); const o = {}; (r.data || []).forEach(x => { if (x.signedUrl) o[x.path] = x.signedUrl; }); return o; },
     ins: (t, row) => sb.from(t).insert(row),
     upd: (t, id, patch) => sb.from(t).update(patch).eq('id', id),
     del: (t, id) => sb.from(t).delete().eq('id', id),
@@ -64,16 +76,17 @@
   const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
   const SEED = {
     styles: [['Daily Stripe Shirt set', 14], ['Tie Top set', 16], ['Side-Button Tunic set', 16], ['Wrap Top set', 18], ['Kimono Hosting set', 20]].map((s, i) => ({ id: i + 1, name: s[0], target_price: s[1], sort: i + 1, active: true })),
-    categories: [['Fabric', 'per_set'], ['Sewing', 'per_set'], ['Embroidery', 'per_set'], ['Trims & buttons', 'per_set'], ['Labels & packaging', 'per_set'], ['Delivery', 'per_set'], ['Samples', 'overhead'], ['Exhibition', 'overhead'], ['Booth display', 'overhead'], ['Photoshoot', 'overhead'], ['Licence & bank', 'overhead'], ['Marketing', 'overhead'], ['Other', 'overhead']].map((c, i) => ({ name: c[0], kind: c[1], sort: i })),
-    phases: [['p1', 'Brand, licence & bank', '2026-10-26', '2026-11-22'], ['p2', 'Tailor quotes & samples', '2026-11-02', '2026-12-06'], ['p3', 'Exhibition applications', '2026-11-16', '2026-12-20'], ['p4', 'Photoshoot', '2026-12-07', '2026-12-13'], ['p5', 'Instagram launch', '2026-12-01', '2027-01-04'], ['p6', 'Production', '2026-12-21', '2027-01-24'], ['p7', 'Pre-orders', '2027-01-05', '2027-01-25'], ['p8', 'Exhibitions & sales', '2027-01-18', '2027-02-07'], ['p9', 'Ramadan', '2027-02-08', '2027-02-14']].map((p, i) => ({ id: p[0], name: p[1], starts: p[2], ends: p[3], sort: i + 1 })),
-    tasks: { p1: ['Pick the final brand name', 'Reserve the Instagram and TikTok handles', 'Ask MOCI which licence fits clothing sales', 'Apply for the licence', 'Open a business bank account', 'Get bank approval for online payments', 'Set up a payment link provider'], p2: ['Shortlist 3 tailors and 1 embroidery shop', 'Send the Ramadan drop specs to each tailor', 'Get quotes at 20, 50 and 100 sets', 'Buy fabric swatches in cream, sand and taupe', 'Wash-test the swatches 5 times at 40°C', 'Order one sample of each set in size M', 'Fit the samples on a real household worker', 'Approve final changes with the tailor', 'Digitize the logo for embroidery'], p3: ['List Ramadan exhibitions and their deadlines', 'Write the bilingual brand blurb', 'Prepare 5–8 real product photos', 'Send the exhibition applications'], p4: ['Book a photographer and models', 'Shoot front, back and side of each set', 'Shoot in-use scenes: serving, carrying, iftar table', 'Shoot close-ups: piping, embroidery, fabric'], p5: ['Set up profile picture, bio and highlight covers', 'Post the first 3 teaser posts', 'Run a colour poll in stories', 'Post the full 9-post grid'], p6: ['Book tailor capacity in writing', 'Order the first stock', 'Order labels, hang tags and packaging', 'Quality-check every piece', 'Pack sets with tags and thank-you cards'], p7: ['Open pre-orders with the early-bird offer', 'Announce the last order date', 'Confirm every deposit in Orders'], p8: ['Pack the booth kit', 'Collect WhatsApp numbers at the booth', 'Follow up every booth contact within 48 hours'], p9: ['Deliver the last orders', 'Share customer photos from iftars', 'Send restock alerts for what sold out'] },
-    checklist: [['booth', 'Clothing rail and hangers'], ['booth', 'Mannequin in the Tie Top set'], ['booth', 'Full size run and a mirror'], ['booth', 'Swatch and embroidery board'], ['booth', 'Price and pack-offer sign (AR/EN)'], ['booth', 'Order forms, tape measure, size chart'], ['booth', 'Card machine or payment QR'], ['booth', 'Instagram and WhatsApp QR'], ['booth', 'Lantern and tray props'], ['ig_weeks', 'Week 1 · Tease', 'Profile, bio, highlights · 3 teaser posts · colour poll'], ['ig_weeks', 'Week 2 · Reveal', 'Lookbook carousel · 2 reels of the sets in use · size guide highlight'], ['ig_weeks', 'Week 3 · Pre-orders', 'Early-bird post · countdown sticker · first customer story'], ['ig_weeks', 'Week 4 · Exhibition', 'Booth location post · daily booth stories · try-on reel'], ['ig_weeks', 'Ramadan · Proof', 'Customer photos · thank-you posts · restock alerts']],
+    categories: [['Fabric', 'per_set'], ['Sewing', 'per_set'], ['Embroidery', 'per_set'], ['Trims & buttons', 'per_set'], ['Labels & packaging', 'per_set'], ['Delivery', 'per_set'], ['Samples', 'overhead'], ['Exhibition', 'overhead'], ['Booth display', 'overhead'], ['Photoshoot', 'overhead'], ['License & bank', 'overhead'], ['Marketing', 'overhead'], ['Other', 'overhead']].map((c, i) => ({ name: c[0], kind: c[1], sort: i })),
+    phases: [['p1', 'Brand, license & bank', '2026-10-26', '2026-11-22'], ['p2', 'Tailor quotes & samples', '2026-11-02', '2026-12-06'], ['p3', 'Exhibition applications', '2026-11-16', '2026-12-20'], ['p4', 'Photoshoot', '2026-12-07', '2026-12-13'], ['p5', 'Instagram launch', '2026-12-01', '2027-01-04'], ['p6', 'Production', '2026-12-21', '2027-01-24'], ['p7', 'Pre-orders', '2027-01-05', '2027-01-25'], ['p8', 'Exhibitions & sales', '2027-01-18', '2027-02-07'], ['p9', 'Ramadan', '2027-02-08', '2027-02-14']].map((p, i) => ({ id: p[0], name: p[1], starts: p[2], ends: p[3], sort: i + 1 })),
+    tasks: { p1: ['Pick the final brand name', 'Reserve the Instagram and TikTok handles', 'Ask MOCI which license fits clothing sales', 'Apply for the license', 'Open a business bank account', 'Get bank approval for online payments', 'Set up a payment link provider'], p2: ['Shortlist 3 tailors and 1 embroidery shop', 'Send the Ramadan drop specs to each tailor', 'Get quotes at 20, 50 and 100 sets', 'Buy fabric swatches in cream, sand and taupe', 'Wash-test the swatches 5 times at 40°C', 'Order one sample of each set in size M', 'Fit the samples on a real household worker', 'Approve final changes with the tailor', 'Digitize the logo for embroidery'], p3: ['List Ramadan exhibitions and their deadlines', 'Write the bilingual brand blurb', 'Prepare 5–8 real product photos', 'Send the exhibition applications'], p4: ['Book a photographer and models', 'Shoot front, back and side of each set', 'Shoot in-use scenes: serving, carrying, iftar table', 'Shoot close-ups: piping, embroidery, fabric'], p5: ['Set up profile picture, bio and highlight covers', 'Post the first 3 teaser posts', 'Run a color poll in stories', 'Post the full 9-post grid'], p6: ['Book tailor capacity in writing', 'Order the first stock', 'Order labels, hang tags and packaging', 'Quality-check every piece', 'Pack sets with tags and thank-you cards'], p7: ['Open pre-orders with the early-bird offer', 'Announce the last order date', 'Confirm every deposit in Orders'], p8: ['Pack the booth kit', 'Collect WhatsApp numbers at the booth', 'Follow up every booth contact within 48 hours'], p9: ['Deliver the last orders', 'Share customer photos from iftars', 'Send restock alerts for what sold out'] },
+    checklist: [['booth', 'Clothing rail and hangers'], ['booth', 'Mannequin in the Tie Top set'], ['booth', 'Full size run and a mirror'], ['booth', 'Swatch and embroidery board'], ['booth', 'Price and pack-offer sign (AR/EN)'], ['booth', 'Order forms, tape measure, size chart'], ['booth', 'Card machine or payment QR'], ['booth', 'Instagram and WhatsApp QR'], ['booth', 'Lantern and tray props'], ['ig_weeks', 'Week 1 · Tease', 'Profile, bio, highlights · 3 teaser posts · color poll'], ['ig_weeks', 'Week 2 · Reveal', 'Lookbook carousel · 2 reels of the sets in use · size guide highlight'], ['ig_weeks', 'Week 3 · Pre-orders', 'Early-bird post · countdown sticker · first customer story'], ['ig_weeks', 'Week 4 · Exhibition', 'Booth location post · daily booth stories · try-on reel'], ['ig_weeks', 'Ramadan · Proof', 'Customer photos · thank-you posts · restock alerts']],
     posts: [['announce', 'Coming this Ramadan: uniforms your household team will love wearing.'], ['product', 'The Tie Top set: mandarin collar, gold piping, straight pants.'], ['detail', 'Gold piping on every collar and cuff.'], ['bts', 'At the tailor: first samples, first fittings.'], ['quote', 'Hospitality is the first gift you give a guest.'], ['product', 'The Kimono Hosting set, for iftar and ghabga nights.'], ['detail', 'Your family initials, embroidered.'], ['offer', 'Household packs of 3, embroidery included.'], ['announce', 'Pre-orders open. Last order date in stories.']]
   };
+  const DETAILS = {"Pick the final brand name": "Shortlist 3 names together, check each is free on Instagram and as a MOCI trade name, then pick one. Done when: one name agreed by both of you.", "Reserve the Instagram and TikTok handles": "Create both accounts with the same handle (e.g. name.kw), set to Business. Done when: both handles are yours.", "Ask MOCI which license fits clothing sales": "Call 135 or visit the Kuwait Business Center. Ask: home business vs freelance license, and whether a private-sector job affects it. Done when: you know which license to apply for.", "Apply for the license": "Apply through Sahel Business with civil ID and the activity MOCI confirmed. Done when: the application is submitted.", "Open a business bank account": "Book an appointment with your bank; bring civil ID and the license. Done when: account number received.", "Get bank approval for online payments": "Ask the bank for a written OK to receive payment-link payouts. Done when: approval letter or email received.", "Set up a payment link provider": "Compare 2 providers (fees, payout days), sign up with the business account. Done when: a test KD 1 payment reaches your account.", "Shortlist 3 tailors and 1 embroidery shop": "Ask 5 friends for tailors, visit 3 in Mubarakiya/Hawally/Salmiya. Add each to Suppliers. Done when: 3 tailors + 1 embroidery shop saved with phone numbers.", "Send the Ramadan drop specs to each tailor": "Share the Ramadan drop page (screenshots) on WhatsApp. Done when: all 3 tailors have the specs.", "Get quotes at 20, 50 and 100 sets": "Ask each tailor for price per set at each quantity and lead time. Done when: every quote is logged in Suppliers.", "Buy fabric swatches in cream, sand and taupe": "Buy 0.5 m of 2–3 fabrics per color. Log the cost as a Samples expense. Done when: swatches in hand.", "Wash-test the swatches 5 times at 40°C": "Wash, dry, iron 5 times; check shrinking, fading, creasing. Done when: you pick the winning fabric.", "Order one sample of each set in size M": "Give the chosen tailor the winning fabric. Done when: 5 samples ordered with a pickup date.", "Fit the samples on a real household worker": "Ask her to wear each for an hour of normal work; note what is tight, hot or awkward. Done when: a list of changes per set.", "Approve final changes with the tailor": "Go through the change list; agree price, deadline and defect policy in writing. Done when: tailor confirms on WhatsApp.", "Digitize the logo for embroidery": "Send the logo file (Brand kit) to the embroidery shop. Done when: you have the DST/PES file and a stitched test.", "List Ramadan exhibitions and their deadlines": "Search Instagram for Ramadan bazaars (معارض رمضان), ask friends. Add each on Exhibitions with fee and deadline. Done when: at least 5 listed.", "Write the bilingual brand blurb": "2–3 sentences in Arabic and English: who it is for, what is special, price range. Done when: both of you approve it.", "Prepare 5–8 real product photos": "Photograph the samples on a person in daylight against a plain wall. Done when: 5–8 photos uploaded to Brand kit → Product photos.", "Send the exhibition applications": "Apply to your top 2–3. Mark each \"Applied\" on Exhibitions. Done when: all applications sent.", "Book a photographer and models": "Get 2 quotes, book a half-day. Get written consent from models. Done when: date and price confirmed.", "Shoot front, back and side of each set": "Plain background, natural light, same angle for every set. Done when: 3 shots per set uploaded.", "Shoot in-use scenes: serving, carrying, iftar table": "Real home, real tasks: tray, dallah, holding a child's hand. Done when: 6+ lifestyle shots uploaded.", "Shoot close-ups: piping, embroidery, fabric": "Macro shots of each detail. Done when: 5+ close-ups uploaded.", "Set up profile picture, bio and highlight covers": "Use the logo from Brand kit as the profile picture; write the bio; make 5 highlight covers. Done when: profile looks finished.", "Post the first 3 teaser posts": "Behind the scenes, fabric swatches, a sketch. Done when: 3 posts live.", "Run a color poll in stories": "Ask followers which color they want first. Done when: poll ran 24 h and you noted the winner.", "Post the full 9-post grid": "Use the Instagram planner. Done when: 9 posts live.", "Book tailor capacity in writing": "Confirm how many sets per week they can do in January and the final delivery date. Done when: written confirmation.", "Order the first stock": "Deepest in the Tie Top set, sizes M and L. Pay the deposit and log it in Expenses. Done when: order placed.", "Order labels, hang tags and packaging": "Neck labels, care labels, hang tags, bags, thank-you cards. Log in Expenses. Done when: ordered with a delivery date.", "Quality-check every piece": "Check seams, piping, embroidery spelling, measurements. Done when: every piece passed or sent back.", "Pack sets with tags and thank-you cards": "One set per bag with tag and card. Done when: all stock packed and counted.", "Open pre-orders with the early-bird offer": "Post the offer and how to order on WhatsApp. Done when: post live and first enquiry answered.", "Announce the last order date": "Post and pin a story with the date. Done when: announced.", "Confirm every deposit in Orders": "Match each payment to an order. Done when: every order shows the right deposit.", "Pack the booth kit": "Tick everything on Exhibitions → Booth kit. Done when: all items ticked.", "Collect WhatsApp numbers at the booth": "Ask every visitor who likes a set. Done when: numbers saved in one list.", "Follow up every booth contact within 48 hours": "Send photos, prices and the order link. Done when: every contact messaged.", "Deliver the last orders": "Done when: every order is marked Delivered.", "Share customer photos from iftars": "Ask happy customers for photos (with permission). Done when: 3+ shared.", "Send restock alerts for what sold out": "Done when: alert posted and waitlist messaged."};
   function demoFresh() {
-    const t = []; Object.entries(SEED.tasks).forEach(([ph, list]) => list.forEach((title, i) => t.push({ id: uid(), phase_id: ph, title, details: '', sort: i + 1, owner: null, assigned_to: null, scheduled_for: null, snoozed_until: null, rolled_over: 0, done: false, done_by: null, done_at: null, created_at: new Date().toISOString() })));
+    const t = []; Object.entries(SEED.tasks).forEach(([ph, list]) => list.forEach((title, i) => t.push({ id: uid(), phase_id: ph, title, details: DETAILS[title] || '', sort: i + 1, owner: null, assigned_to: null, scheduled_for: null, snoozed_until: null, rolled_over: 0, done: false, done_by: null, done_at: null, created_at: new Date().toISOString() })));
     return {
-      settings: { id: 1, budget: 1500, multiplier: 2.5, round_to: 1, pack_size: 3, pack_discount: 0.1, planned_sets: 100, include_overheads: true, target_min: 14, target_max: 20, tasks_per_day: 3, brand_name: 'Diyafa', brand_ar: 'ضيافة', ig_bio: 'Ramadan uniforms for your household team · Kuwait\nFamily embroidery · Household packs\nOrder on WhatsApp ↓', shortlist: {} },
+      settings: { id: 1, budget: 1500, multiplier: 2.5, round_to: 1, pack_size: 3, pack_discount: 0.1, planned_sets: 100, include_overheads: true, target_min: 14, target_max: 20, tasks_per_day: 3, brand_name: 'myuniform.kw', brand_ar: '', ig_bio: 'Ramadan uniforms for your household team · Kuwait\nFamily embroidery · Household packs\nOrder on WhatsApp ↓', shortlist: {} },
       members: [{ email: 'you@demo', name: 'You' }, { email: 'partner@demo', name: 'Partner' }],
       tasks: t, expenses: [], orders: [], overrides: {}, expos: [], suppliers: [], activity: [],
       checklist: SEED.checklist.map((c, i) => ({ id: uid(), list: c[0], title: c[1], details: c[2] || '', sort: i, done: false })),
@@ -98,14 +111,14 @@
     const avg = a => { const t = a.reduce((x, e) => x + num(e.amount), 0), s = a.reduce((x, e) => x + num(e.sets_covered), 0); return s ? t / s : 0; };
     const oh = ex.filter(e => kind(e.category) === 'overhead').reduce((a, e) => a + num(e.amount), 0);
     const ohPer = st.include_overheads && st.planned_sets > 0 ? oh / st.planned_sets : 0, r = num(st.round_to) || 1;
-    const pricing = SEED.styles.map(s => {
+    const pricing = (db.styles || SEED.styles).filter(s => s.active !== false).map(s => {
       const breakdown = {}; let direct = 0;
       cats.filter(c => c.kind === 'per_set').forEach(c => { const v = avg(ex.filter(e => e.category === c.name && e.scope === 'style' && Number(e.style_id) === s.id && num(e.sets_covered) > 0)) + avg(ex.filter(e => e.category === c.name && e.scope === 'all_styles' && num(e.sets_covered) > 0)); breakdown[c.name] = v; direct += v; });
       const has = ex.some(e => kind(e.category) === 'per_set' && e.scope === 'style' && Number(e.style_id) === s.id && num(e.sets_covered) > 0);
       const full = direct + ohPer, sug = has && full > 0 ? Math.ceil(full * st.multiplier / r) * r : 0, ov = num(db.overrides[s.id]) || null, fp = ov || sug;
       return { style_id: s.id, name: s.name, sort: s.sort, target_price: s.target_price, breakdown, direct_cost: direct, overhead_per_set: ohPer, full_cost: full, suggested_price: sug, price_override: ov, final_price: fp, profit_per_set: fp ? fp - full : 0, margin: fp ? (fp - full) / fp : 0, pack_price: fp ? Math.ceil(fp * st.pack_size * (1 - st.pack_discount) / r) * r : 0, max_cost_for_target: s.target_price / (st.multiplier || 1), range_status: !fp ? 'no costs yet' : fp < st.target_min ? 'below range' : fp > st.target_max ? 'above range' : 'in range', has_costs: has };
     });
-    const orders = db.orders.map(o => { const p = pricing.find(x => x.style_id === Number(o.style_id)) || { final_price: 0, full_cost: 0 }; const per = num(o.price_charged) || p.final_price, tot = per * o.qty * (1 - num(o.discount_pct) / 100); return Object.assign({}, o, { style_name: (SEED.styles.find(s => s.id === Number(o.style_id)) || {}).name, price_per_set: per, order_total: tot, balance_due: tot - num(o.deposit), cost_of_goods: p.full_cost * o.qty, profit: tot - p.full_cost * o.qty }); }).sort((a, b) => b.ordered_on.localeCompare(a.ordered_on));
+    const orders = db.orders.map(o => { const p = pricing.find(x => x.style_id === Number(o.style_id)) || { final_price: 0, full_cost: 0 }; const per = num(o.price_charged) || p.final_price, tot = per * o.qty * (1 - num(o.discount_pct) / 100); return Object.assign({}, o, { style_name: ((db.styles || SEED.styles).find(s => s.id === Number(o.style_id)) || {}).name, price_per_set: per, order_total: tot, balance_due: tot - num(o.deposit), cost_of_goods: p.full_cost * o.qty, profit: tot - p.full_cost * o.qty }); }).sort((a, b) => b.ordered_on.localeCompare(a.ordered_on));
     const live = orders.filter(o => o.status !== 'Cancelled'), sum = f => live.reduce((a, o) => a + num(o[f]), 0), spent = ex.reduce((a, e) => a + num(e.amount), 0), sets = sum('qty'), profit = sum('profit'), rev = sum('order_total');
     const summary = { budget: st.budget, spent, budget_left: st.budget - spent, budget_used: st.budget ? spent / st.budget : 0, revenue: rev, collected: sum('deposit'), owed: sum('balance_due'), profit, sets_sold: sets, orders: live.length, net_position: rev - spent, avg_profit_per_set: sets ? profit / sets : 0, sets_to_break_even: sets && profit > 0 ? Math.max(0, Math.ceil((spent - rev) / (profit / sets))) : null };
     const spend = cats.map(c => ({ category: c.name, kind: c.kind, spent: ex.filter(e => e.category === c.name).reduce((a, e) => a + num(e.amount), 0) })).sort((a, b) => b.spent - a.spent);
@@ -113,12 +126,16 @@
   }
   const Local = {
     async load() {
-      const db = db0(), todayList = demoPull(db); store.set(db);
-      return Object.assign({ settings: db.settings, styles: SEED.styles, categories: SEED.categories, members: db.members, phases: SEED.phases, tasks: db.tasks, expenses: db.expenses.slice().sort((a, b) => b.spent_on.localeCompare(a.spent_on)), expos: db.expos, checklist: db.checklist, suppliers: db.suppliers, posts: db.posts.slice().sort((a, b) => a.position - b.position), activity: db.activity.slice(0, 300), todayList }, compute(db));
+      const db = db0(); db.assets = db.assets || []; db.settings.palette = db.settings.palette || []; const todayList = demoPull(db); store.set(db);
+      if (!db.styles) db.styles = JSON.parse(JSON.stringify(SEED.styles));
+      return Object.assign({ settings: db.settings, styles: db.styles, categories: SEED.categories, members: db.members, phases: SEED.phases, tasks: db.tasks, expenses: db.expenses.slice().sort((a, b) => b.spent_on.localeCompare(a.spent_on)), expos: db.expos, checklist: db.checklist, suppliers: db.suppliers, posts: db.posts.slice().sort((a, b) => a.position - b.position), activity: db.activity.slice(0, 300), assets: db.assets.slice().reverse(), reviews: (db.reviews || []).slice().sort((a, b) => b.week_start.localeCompare(a.week_start)), stock: db.stock || [], todayList }, compute(db));
     },
     async ins(t, row) {
-      const db = db0(), key = { ig_posts: 'posts' }[t] || t; const r = Object.assign({ id: uid(), created_by: S.me, created_at: new Date().toISOString() }, row);
-      if (t === 'tasks') Object.assign(r, { done: false, rolled_over: 0, sort: r.sort || 100 });
+      const db = db0(), key = { ig_posts: 'posts', weekly_reviews: 'reviews' }[t] || t; const r = Object.assign({ id: uid(), created_by: S.me, created_at: new Date().toISOString() }, row);
+      if (t === 'tasks') Object.assign(r, { done: false, rolled_over: 0, sort: r.sort == null ? 100 : r.sort });
+      if (!db[key]) db[key] = [];
+      if (t === 'weekly_reviews') logLocal(db, 'review', 'planned', 'Week of ' + day(r.week_start));
+      if (t === 'styles') { db.styles = db.styles || JSON.parse(JSON.stringify(SEED.styles)); r.id = Math.max(0, ...db.styles.map(x => x.id)) + 1; }
       db[key].push(r);
       if (t === 'tasks') logLocal(db, 'task', 'added', r.title);
       if (t === 'expenses') logLocal(db, 'expense', 'added', r.item || r.category, 'KD ' + r.amount + ' · ' + r.category);
@@ -128,16 +145,25 @@
       store.set(db); return {};
     },
     async upd(t, id, p) {
-      const db = db0(), key = { ig_posts: 'posts' }[t] || t; const r = db[key].find(x => x.id === id); if (!r) return {};
+      const db = db0(), key = { ig_posts: 'posts', weekly_reviews: 'reviews' }[t] || t; if (t === 'styles') db.styles = db.styles || JSON.parse(JSON.stringify(SEED.styles)); const r = (db[key] || []).find(x => String(x.id) === String(id)); if (!r) return {};
       const old = Object.assign({}, r); Object.assign(r, p);
-      if (t === 'tasks') { if (r.done && !old.done) logLocal(db, 'task', 'completed', r.title); else if (!r.done && old.done) logLocal(db, 'task', 'reopened', r.title); else if (p.snoozed_until) logLocal(db, 'task', 'postponed', r.title); }
-      if (t === 'orders' && p.status && p.status !== old.status) logLocal(db, 'order', 'moved', r.customer, old.status + ' → ' + p.status);
+      if (t === 'tasks') { if (p.assigned_to && old.assigned_to && p.assigned_to !== old.assigned_to) logLocal(db, 'task', 'handed over', r.title, 'to ' + p.assigned_to); if (r.done && !old.done) logLocal(db, 'task', 'completed', r.title); else if (!r.done && old.done) logLocal(db, 'task', 'reopened', r.title); else if (p.snoozed_until) logLocal(db, 'task', 'postponed', r.title); }
+      if (t === 'orders' && p.status && p.status !== old.status) { logLocal(db, 'order', 'moved', r.customer, old.status + ' → ' + p.status); const sk = (db.stock || []).find(x => x.style_id === Number(r.style_id) && x.size === r.size && x.color === r.color); if (sk && p.status === 'Delivered') sk.qty -= num(r.qty); if (sk && old.status === 'Delivered') sk.qty += num(r.qty); }
       if (t === 'checklist' && r.done && !old.done) logLocal(db, 'checklist', 'ticked', r.title);
       if (t === 'expos' && p.status && p.status !== old.status) logLocal(db, 'expo', 'moved', r.name, old.status + ' → ' + p.status);
       if (t === 'suppliers' && r.chosen && !old.chosen) logLocal(db, 'supplier', 'chose', r.name);
       store.set(db); return {};
     },
-    async del(t, id) { const db = db0(), key = { ig_posts: 'posts' }[t] || t; const r = db[key].find(x => x.id === id); db[key] = db[key].filter(x => x.id !== id); if (r && t === 'tasks') logLocal(db, 'task', 'deleted', r.title); if (r && t === 'expenses') logLocal(db, 'expense', 'deleted', r.item || r.category, 'KD ' + r.amount); if (r && t === 'orders') logLocal(db, 'order', 'deleted', r.customer); store.set(db); return {}; },
+    async del(t, id) { const db = db0(), key = { ig_posts: 'posts', weekly_reviews: 'reviews' }[t] || t; const r = (db[key] || []).find(x => String(x.id) === String(id)); db[key] = (db[key] || []).filter(x => String(x.id) !== String(id)); if (r && t === 'tasks') logLocal(db, 'task', 'deleted', r.title); if (r && t === 'expenses') logLocal(db, 'expense', 'deleted', r.item || r.category, 'KD ' + r.amount); if (r && t === 'orders') logLocal(db, 'order', 'deleted', r.customer); store.set(db); return {}; },
+    async upload(slot, file) {
+      if (file.size > 1.5e6) return { error: { message: 'Demo mode keeps files under 1.5 MB. Connect Supabase for bigger files.' } };
+      const url = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); });
+      const db = db0(); db.assets = db.assets || []; db.assets.push({ id: uid(), slot, name: file.name, path: url, mime: file.type || '', size: file.size, created_by: S.me, created_at: new Date().toISOString() });
+      logLocal(db, 'asset', 'uploaded', file.name, slot); store.set(db); return {};
+    },
+    async removeAsset(a) { const db = db0(); db.assets = (db.assets || []).filter(x => x.id !== a.id); logLocal(db, 'asset', 'removed', a.name, a.slot); store.set(db); return {}; },
+    async urls(paths) { const o = {}; paths.forEach(p => o[p] = p); return o; },
+    async setStock(style_id, size, color, qty) { const db = db0(); db.stock = db.stock || []; const r = db.stock.find(x => x.style_id === style_id && x.size === size && x.color === color); if (r) r.qty = qty; else db.stock.push({ id: uid(), style_id, size, color, qty, low_at: 3 }); store.set(db); return {}; },
     async override(sid, price) { const db = db0(); if (price > 0) db.overrides[sid] = price; else delete db.overrides[sid]; store.set(db); return {}; },
     async settings(p) { const db = db0(); Object.assign(db.settings, p); logLocal(db, 'setting', 'changed', 'Settings'); store.set(db); return {}; }
   };
@@ -147,7 +173,9 @@
     try {
       const before = S.d ? S.d.todayList.filter(t => !t.done).length : null;
       const d = await API.load();
-      S.d = d;
+      S.d = d; S.urls = S.urls || {};
+      const need = (d.assets || []).filter(a => /^image\//.test(a.mime) && !S.urls[a.path]).map(a => a.path);
+      if (need.length) { try { Object.assign(S.urls, await API.urls(need)); } catch (_) { } }
       const open = d.todayList.filter(t => !t.done).length;
       if (opts.afterTask && before === 0 && open > 0) toast('All done! ' + open + ' new tasks added for you.');
       const a = document.activeElement;
@@ -171,32 +199,60 @@
   const av = email => `<span class="av" aria-hidden="true">${esc(nameOf(email).slice(0, 1).toUpperCase())}</span>`;
 
   /* ============================ project manager ============================ */
+  function partner() { return others()[0]; }
+  const SIZES = ['S', 'M', 'L', 'XL', 'XXL', '3XL'];
+  function weekStart(d = today()) { const t = new Date(d + 'T12:00:00Z'); t.setUTCDate(t.getUTCDate() - t.getUTCDay()); return t.toISOString().slice(0, 10); }
+  function currentPhase() { const t = today(), ph = S.d.phases; return ph.find(p => p.starts <= t && p.ends >= t) || ph.find(p => p.starts > t) || ph[ph.length - 1]; }
+  function gates() {
+    const d = S.d, find = title => d.tasks.find(x => x.title.toLowerCase() === title.toLowerCase());
+    const T = title => { const x = find(title); return { ok: !!(x && x.done), label: title, task: x }; };
+    const C = (ok, label, go) => ({ ok, label, go });
+    const sets = d.pricing, stockTotal = (d.stock || []).reduce((a, x) => a + Math.max(0, num(x.qty)), 0);
+    const list = [
+      ['Brand & license ready', 'You can legally sell and take payments.', [T('Pick the final brand name'), T('Apply for the license'), T('Open a business bank account'), T('Set up a payment link provider')]],
+      ['Samples approved', 'Never order stock before a real person has worn the sample for a day.', [C(d.suppliers.some(x => x.type === 'Tailor' && x.chosen), 'Choose your tailor in Suppliers', 'suppliers'), T('Wash-test the swatches 5 times at 40°C'), T('Fit the samples on a real household worker'), T('Approve final changes with the tailor')]],
+      ['Prices inside your range', `Every set must sell between ${num(d.settings.target_min)} and ${num(d.settings.target_max)} KD and still make money.`, [C(sets.length && sets.every(p => p.has_costs), 'Log fabric and sewing costs for every set', 'expenses'), C(sets.length && sets.every(p => p.range_status === 'in range'), 'Get every set’s price inside your range', 'money')]],
+      ['Exhibition booked', 'One booked exhibition gives you a launch date to work towards.', [C(d.expos.some(x => ['Accepted', 'Paid', 'Done'].includes(x.status)), 'Get accepted to at least one exhibition', 'expos')]],
+      ['Instagram live', 'People need somewhere to see the sets and order.', [T('Set up profile picture, bio and highlight covers'), T('Post the full 9-post grid')]],
+      ['Stock ready', 'Enough checked, packed stock to sell from day one.', [T('Order the first stock'), C(stockTotal > 0, 'Enter your stock in Inventory', 'stock'), T('Quality-check every piece')]],
+      ['Open for orders', 'Money coming in.', [T('Open pre-orders with the early-bird offer'), C(d.orders.length > 0, 'Take your first order', 'orders')]]
+    ];
+    let cur = -1;
+    return list.map(([name, why, checks], i) => { const done = checks.every(c => c.ok); let state = done ? 'done' : 'todo'; if (!done && cur < 0) { cur = i; state = 'current'; } else if (!done) state = 'locked'; return { name, why, checks, state, n: i + 1 }; });
+  }
   function pmNotes() {
-    const d = S.d, t = today(), notes = [];
-    const tasks = d.tasks, ph = d.phases;
+    const d = S.d, t = today(), notes = [], tasks = d.tasks, ph = d.phases, p2 = partner();
+    const A = (label, attrs) => ({ label, attrs });
+    const nameP = p2 ? nameOf(p2.email) : 'your partner';
     ph.forEach(p => {
-      const list = tasks.filter(x => x.phase_id === p.id); if (!list.length) return;
-      const done = list.filter(x => x.done).length, total = list.length, actual = done / total;
-      if (t < p.starts) return;
-      const span = Math.max(1, daysBetween(p.starts, p.ends)), exp = Math.min(1, daysBetween(p.starts, t) / span);
-      if (t > p.ends && done < total) notes.push(['r', `<b>${esc(p.name)}</b> was due ${day(p.ends)} and still has ${total - done} open task${total - done === 1 ? '' : 's'}.`]);
-      else if (actual + 0.2 < exp) notes.push(['a', `<b>${esc(p.name)}</b> is behind: ${done}/${total} done, ${Math.round(exp * 100)}% of its time used. Ends ${day(p.ends)}.`]);
-      else if (done === total) notes.push(['g', `<b>${esc(p.name)}</b> is complete.`]);
+      const list = tasks.filter(x => x.phase_id === p.id); if (!list.length || t < p.starts) return;
+      const done = list.filter(x => x.done).length, total = list.length, left = total - done;
+      const span = Math.max(1, daysBetween(p.starts, p.ends)), exp = Math.min(1, daysBetween(p.starts, t) / span), daysLeft = daysBetween(t, p.ends);
+      if (t > p.ends && left) notes.push({ lvl: 'r', html: `<b>${esc(p.name)}</b> is overdue: ${left} task${left === 1 ? '' : 's'} left. Finish these before anything new.`, actions: [A('Show tasks', `data-go="plan"`)] });
+      else if (left && done / total + 0.2 < exp) notes.push({ lvl: 'a', html: `<b>${esc(p.name)}</b> is behind: ${done}/${total} done with ${daysLeft} day${daysLeft === 1 ? '' : 's'} left. Do about ${Math.ceil(left / Math.max(1, daysLeft / 2))} tasks every 2 days to catch up.`, actions: [A('Show tasks', `data-go="plan"`)] });
     });
-    tasks.filter(x => !x.done && x.assigned_to && (x.rolled_over || 0) >= 2).forEach(x => notes.push(['a', `“${esc(x.title)}” has been on ${isMe(x.assigned_to) ? 'your' : esc(nameOf(x.assigned_to)) + '’s'} list for ${x.rolled_over + 1} days. Do it, split it, or tap “Not today”.`]));
+    tasks.filter(x => !x.done && x.assigned_to && (x.rolled_over || 0) >= 2).forEach(x => {
+      if (isMe(x.assigned_to)) notes.push({ lvl: 'a', html: `“${esc(x.title)}” has been on your list for ${x.rolled_over + 1} days. Do it first today, or hand it over.`, actions: p2 ? [A(`Give to ${esc(nameP)}`, `data-act="reassign" data-id="${esc(x.id)}" data-to="${esc(p2.email)}"`), A('Not today', `data-act="snooze" data-id="${esc(x.id)}"`)] : [A('Not today', `data-act="snooze" data-id="${esc(x.id)}"`)] });
+      else notes.push({ lvl: 'a', html: `“${esc(x.title)}” has been on ${esc(nameOf(x.assigned_to))}’s list for ${x.rolled_over + 1} days.`, actions: [A('Take it over', `data-act="reassign" data-id="${esc(x.id)}" data-to="${esc(S.me)}"`)] });
+    });
     const s = d.summary || {};
-    if (num(s.budget_used) >= 0.8) notes.push([num(s.budget_used) >= 1 ? 'r' : 'a', `Budget ${pct(s.budget_used)} used: ${kd(s.budget_left)} left.`]);
-    d.pricing.filter(p => p.range_status === 'above range').forEach(p => notes.push(['a', `<b>${esc(p.name)}</b> prices at ${kd(p.final_price)}, above your ${num(d.settings.target_min)}–${num(d.settings.target_max)} KD range. Its cost per set needs to drop to ${kd(p.max_cost_for_target)}.`]));
-    d.expos.filter(x => x.apply_by && x.status === 'Researching' && daysBetween(t, x.apply_by) <= 10 && daysBetween(t, x.apply_by) >= 0).forEach(x => notes.push(['r', `Apply to <b>${esc(x.name)}</b> by ${day(x.apply_by)} (${daysBetween(t, x.apply_by)} days).`]));
-    d.orders.filter(o => o.status === 'New' && daysBetween(o.ordered_on, t) >= 3).forEach(o => notes.push(['a', `${esc(o.customer)}’s order has been “New” for ${daysBetween(o.ordered_on, t)} days. Confirm the deposit.`]));
-    d.orders.filter(o => o.status === 'Delivered' && num(o.balance_due) > 0).forEach(o => notes.push(['r', `Collect ${kd(o.balance_due)} from ${esc(o.customer)}: delivered but not fully paid.`]));
-    others().forEach(m => { const ws = weekStats(m.email); if (!ws.lastSeen) notes.push(['i', `${esc(nameOf(m.email))} hasn’t opened the HQ yet. Send them the link.`]); else if (daysBetween(kwDate(new Date(ws.lastSeen)), t) >= 2) notes.push(['a', `${esc(nameOf(m.email))} hasn’t been active for ${daysBetween(kwDate(new Date(ws.lastSeen)), t)} days. A quick check-in?`]); });
-    const meW = weekStats(S.me).doneWeek, oth = others().map(m => `${esc(nameOf(m.email))} ${weekStats(m.email).doneWeek}`).join(', ');
-    if (meW || oth) notes.push(['i', `This week: you finished ${meW} task${meW === 1 ? '' : 's'}${oth ? `; ${oth}` : ''}.`]);
-    const cur = ph.filter(p => p.starts <= t && p.ends >= t); if (cur.length) notes.push(['i', `Focus now: ${cur.map(p => '<b>' + esc(p.name) + '</b>').join(', ')}.`]);
-    const next = ph.find(p => p.starts > t); if (next) notes.push(['i', `Next up: <b>${esc(next.name)}</b> starts ${day(next.starts)}.`]);
-    const rank = { r: 0, a: 1, g: 2, i: 3 };
-    return notes.sort((a, b) => rank[a[0]] - rank[b[0]]);
+    if (num(s.budget_used) >= 0.8) notes.push({ lvl: num(s.budget_used) >= 1 ? 'r' : 'a', html: `Budget ${pct(s.budget_used)} used, ${kd(s.budget_left)} left. Check the biggest costs before buying more.`, actions: [A('Review expenses', `data-go="expenses"`)] });
+    d.pricing.filter(p => p.range_status === 'above range').forEach(p => notes.push({ lvl: 'a', html: `<b>${esc(p.name)}</b> would sell at ${kd(p.final_price)}, above ${num(d.settings.target_min)}–${num(d.settings.target_max)} KD. Get its cost down to ${kd(p.max_cost_for_target)} a set or set a capped price.`, actions: [A('Open pricing', `data-go="pricing"`)] }));
+    d.expos.filter(x => x.apply_by && x.status === 'Researching' && daysBetween(t, x.apply_by) <= 10 && daysBetween(t, x.apply_by) >= 0).forEach(x => notes.push({ lvl: 'r', html: `Apply to <b>${esc(x.name)}</b> by ${day(x.apply_by)}, ${daysBetween(t, x.apply_by)} days left.`, actions: [A('Mark as applied', `data-act="expoApplied" data-id="${esc(x.id)}"`)] }));
+    d.orders.filter(o => o.status === 'New' && daysBetween(o.ordered_on, t) >= 3).forEach(o => notes.push({ lvl: 'a', html: `${esc(o.customer)}’s order has waited ${daysBetween(o.ordered_on, t)} days. Message her for the deposit.`, actions: [A('Deposit received', `data-act="orderStatus" data-id="${esc(o.id)}" data-v="Deposit paid"`)] }));
+    d.orders.filter(o => o.status === 'Delivered' && num(o.balance_due) > 0).forEach(o => notes.push({ lvl: 'r', html: `Collect ${kd(o.balance_due)} from ${esc(o.customer)}. Delivered but not fully paid.`, actions: [A('Mark fully paid', `data-act="markPaid" data-id="${esc(o.id)}" data-v="${num(o.order_total)}"`)] }));
+    const started = id => { const p = ph.find(x => x.id === id); return p && t >= p.starts; };
+    if (started('p2') && !d.suppliers.some(x => x.type === 'Tailor')) notes.push({ lvl: 'a', html: 'No tailors saved yet. Add the first one you talk to, with their quote.', actions: [A('Add a tailor', `data-go="suppliers"`)] });
+    if (started('p3') && !d.expos.length) notes.push({ lvl: 'a', html: 'No exhibitions listed yet. Add the ones you’re considering so deadlines don’t slip.', actions: [A('Add exhibition', `data-go="expos"`)] });
+    if (!(d.assets || []).some(a => a.slot === 'logo')) notes.push({ lvl: 'i', html: 'Upload your logo to the Brand kit so you both use the same file with tailors and printers.', actions: [A('Open Brand kit', `data-go="kit"`)] });
+    if (!d.expenses.length) notes.push({ lvl: 'i', html: 'Log your first expense, even small ones like swatches, so prices stay accurate.', actions: [A('Add expense', `data-go="expenses"`)] });
+    if (p2) { const ws = weekStats(p2.email); const link = location.origin + location.pathname; const msg = `Hey ${nameP}! Your tasks for today are waiting in Business HQ: ${link}`;
+      if (!ws.lastSeen) notes.push({ lvl: 'i', html: `${esc(nameP)} hasn’t opened the HQ yet.`, actions: [A('Copy invite message', `data-act="copy" data-txt="${esc(msg)}"`)] });
+      else if (daysBetween(kwDate(new Date(ws.lastSeen)), t) >= 2) notes.push({ lvl: 'a', html: `${esc(nameP)} hasn’t been active for ${daysBetween(kwDate(new Date(ws.lastSeen)), t)} days.`, actions: [A('Copy reminder', `data-act="copy" data-txt="${esc(msg)}"`)] }); }
+    if (!(d.reviews || []).some(r => r.week_start === weekStart() && isMe(r.author))) notes.push({ lvl: new Date().getDay() === 0 ? 'r' : 'a', html: 'You haven’t planned this week yet. It takes 2 minutes: wins, what’s stuck, and 3 goals.', actions: [A('Plan my week', `data-act="openReview"`)] });
+    (d.stock || []).filter(x => num(x.qty) <= num(x.low_at || 3) && num(x.qty) >= 0 && activeStyles().some(st => st.id === x.style_id)).slice(0, 3).forEach(x => notes.push({ lvl: num(x.qty) <= 0 ? 'r' : 'a', html: `${num(x.qty) <= 0 ? 'Out of stock' : 'Only ' + num(x.qty) + ' left'}: ${esc(styleName(x.style_id).replace(' set', ''))}, ${esc(x.size)}, ${esc(x.color)}.`, actions: [A('Open inventory', `data-go="stock"`)] }));
+    const rank = { r: 0, a: 1, i: 2 };
+    return notes.sort((x, y) => rank[x.lvl] - rank[y.lvl]);
   }
   function weekStats(email) {
     const t = today(), wk = new Date(Date.parse(t) - 6 * 864e5).toISOString().slice(0, 10);
@@ -224,6 +280,8 @@
     orders: '<path d="M6 7h12l-1 13H7z"/><path d="M9 7a3 3 0 0 1 6 0"/>',
     pricing: '<path d="M20 12l-8 8-9-9V3h8z"/><circle cx="7.5" cy="7.5" r="1.5"/>',
     drop: '<path d="M8 3l4 3 4-3 4 4-3 3v11H7V10L4 7z"/>',
+    stock: '<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8M12 13v8"/>',
+    kit: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     brand: '<path d="M12 3l2.6 5.4 5.9.8-4.3 4.1 1 5.9L12 16.4 6.8 19.2l1-5.9L3.5 9.2l5.9-.8z"/>',
     instagram: '<rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r=".6"/>',
     expos: '<path d="M3 21V9l9-6 9 6v12"/><path d="M9 21v-6h6v6"/>',
@@ -235,14 +293,14 @@
   const tiles = list => `<div class="tiles">${list.map((x, i) => `<div class="tile ${i === 0 ? 'dark' : ''}"><div class="t">${x.t}</div><div class="d">${x.dir ? `<span class="tri ${x.dir}">${x.dir === 'up' ? '▲' : '▼'}</span>` : ''}${x.d || '&nbsp;'}</div><div class="v">${x.v}</div>${ARR}</div>`).join('')}</div>`;
   function areaChart(series, labels, fmt) {
     // series: [{name, color, fill, values:[]}]
-    const W = 640, H = 230, L = 52, R = 12, T = 16, B = 30, n = labels.length;
+    const W = window.innerWidth < 600 ? 380 : 640, H = window.innerWidth < 600 ? 220 : 230, L = 44, R = 12, T = 16, B = 30, n = labels.length;
     const max = Math.max(1, ...series.flatMap(s => s.values)) * 1.15;
     const X = i => L + (n <= 1 ? 0 : i * (W - L - R) / (n - 1)), Y = v => T + (H - T - B) * (1 - v / max);
     const path = vals => vals.map((v, i) => { if (!i) return `M${X(0)} ${Y(v)}`; const x0 = X(i - 1), x1 = X(i), cx = (x0 + x1) / 2; return `C${cx} ${Y(vals[i - 1])} ${cx} ${Y(v)} ${x1} ${Y(v)}`; }).join(' ');
     const ticks = [0, .25, .5, .75, 1].map(f => max / 1.15 * f);
     return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(series.map(s => s.name).join(' and '))} over time">
       ${ticks.map(t => `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}" stroke="#E2E2E7"/><text x="${L - 10}" y="${Y(t) + 4}" text-anchor="end" font-size="11" fill="#8A8A94">${esc(fmt(t))}</text>`).join('')}
-      ${labels.map((l, i) => (n <= 8 || i % Math.ceil(n / 8) === 0) ? `<text x="${X(i)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="#8A8A94">${esc(l)}</text>` : '').join('')}
+      ${labels.map((l, i) => (n <= (W < 500 ? 4 : 8) || i % Math.ceil(n / (W < 500 ? 4 : 8)) === 0) ? `<text x="${X(i)}" y="${H - 8}" text-anchor="middle" font-size="11" fill="#8A8A94">${esc(l)}</text>` : '').join('')}
       ${series.map(s => s.fill ? `<path d="${path(s.values)} L${X(n - 1)} ${Y(0)} L${X(0)} ${Y(0)}Z" fill="${s.fill}"/>` : '').join('')}
       ${series.map(s => `<path d="${path(s.values)}" fill="none" stroke="${s.color}" stroke-width="2"/>`).join('')}
       ${(() => { const s = series.find(x => x.fill) || series[0]; const m = Math.max(...s.values); if (!m) return ''; const i = s.values.indexOf(m), x = X(i), y = Y(m), lab = fmt(m), w = 12 + lab.length * 8; return `<rect x="${x - w / 2}" y="${y - 30}" width="${w}" height="22" rx="11" fill="#232326"/><text x="${x}" y="${y - 15}" text-anchor="middle" font-size="12" fill="#fff" font-family="Urbanist, sans-serif">${esc(lab)}</text>`; })()}
@@ -256,48 +314,96 @@
       <text x="100" y="102" text-anchor="middle" font-size="30" fill="#1E1E21" font-family="Urbanist, sans-serif">${esc(center)}</text>
       <text x="100" y="126" text-anchor="middle" font-size="13" fill="#6E6E78" font-family="Urbanist, sans-serif">${esc(sub)}</text></svg>`;
   }
+  function barChart(labels, values, fmt, color) {
+    const W = window.innerWidth < 600 ? 380 : 640, H = 220, L = 40, R = 10, T = 22, B = 30, n = labels.length, max = Math.max(1, ...values) * 1.15, bw = Math.min(46, (W - L - R) / n * 0.55);
+    const X = i => L + (i + 0.5) * (W - L - R) / n, Y = v => T + (H - T - B) * (1 - v / max);
+    return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="Bar chart">${[0, .5, 1].map(f => `<line x1="${L}" x2="${W - R}" y1="${Y(max / 1.15 * f)}" y2="${Y(max / 1.15 * f)}" stroke="#E2E2E7"/><text x="${L - 8}" y="${Y(max / 1.15 * f) + 4}" text-anchor="end" font-size="11" fill="#8A8A94">${esc(fmt(max / 1.15 * f))}</text>`).join('')}
+      ${values.map((v, i) => `<rect x="${X(i) - bw / 2}" y="${Y(v)}" width="${bw}" height="${Math.max(0, Y(0) - Y(v))}" fill="${Array.isArray(color) ? color[i % color.length] : color}"/>${v ? `<text x="${X(i)}" y="${Y(v) - 6}" text-anchor="middle" font-size="11" fill="#1E1E21">${esc(fmt(v))}</text>` : ''}<text x="${X(i)}" y="${H - 9}" text-anchor="middle" font-size="11" fill="#8A8A94">${esc(labels[i])}</text>`).join('')}</svg>`;
+  }
   const short = n => n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(Math.round(n));
 
+  function addBox(key, label, form, emptyList) {
+    const open = S.ui.add && S.ui.add[key] !== undefined ? S.ui.add[key] : !!emptyList;
+    return `<div class="addbar"><button class="btn ${open ? '' : 'solid'}" data-act="toggleAdd" data-k="${key}" aria-expanded="${open}">${open ? 'Close' : '+ ' + label}</button></div>${open ? form : ''}`;
+  }
+  const waLink = p => { let d = String(p || '').replace(/\D/g, ''); if (d.length === 8) d = '965' + d; return d ? 'https://wa.me/' + d : ''; };
   /* ============================ views ============================ */
   const ph = (t, s) => { const g = NAV.find(x => x[1].some(p => p[0] === S.page)); return `<div class="ph"><div class="phrow"><h1>${esc(t)}</h1><label class="search"><input type="search" id="q" placeholder="Search" aria-label="Search this page" value="${esc(S.q || '')}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.8-4.8"/></svg></label></div>
     <div class="tabs ptabs" role="group" aria-label="${esc(g[0])}">${g[1].map(p => `<button class="tab" data-tab="${p[0]}" aria-pressed="${p[0] === S.page}">${esc(p[1])}</button>`).join('')}</div>${s ? `<p class="sub">${s}</p>` : ''}</div>`; };
   const greet = () => { const h = Number(new Date().toLocaleString('en-US', { hour: 'numeric', hour12: false, timeZone: 'Asia/Kuwait' })); return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening'; };
 
-  function taskCard(t, mine) {
-    const phase = (S.d.phases.find(p => p.id === t.phase_id) || {}).name || '';
-    return `<label class="task ${t.done ? 'done' : ''}"><input type="checkbox" data-act="taskDone" data-id="${esc(t.id)}" ${t.done ? 'checked' : ''} ${mine ? '' : 'disabled'} aria-label="Done: ${esc(t.title)}">
-      <span style="flex:1;min-width:0"><span class="tt">${esc(t.title)}</span>${t.details ? `<span class="small muted" style="display:block;margin-top:2px">${esc(t.details)}</span>` : ''}<span class="small muted" style="display:block;margin-top:4px">${esc(phase)}${(t.rolled_over || 0) > 0 && !t.done ? ` · carried over ${t.rolled_over} day${t.rolled_over === 1 ? '' : 's'}` : ''}${t.done && t.done_at ? ' · done ' + ago(t.done_at) : ''}</span></span>
-      ${mine && !t.done ? `<button class="btn sm" data-act="snooze" data-id="${esc(t.id)}">Not today</button>` : ''}</label>`;
+  const PCOL = { p1: '#8B7CF0', p2: '#D08C3A', p3: '#3A8D74', p4: '#C0566E', p5: '#4F7BD9', p6: '#1E1E21', p7: '#8B7CF0', p8: '#D08C3A', p9: '#3A8D74' };
+  function ring(done, total) {
+    const R = 42, C = 2 * Math.PI * R, f = total ? done / total : 0;
+    return `<svg viewBox="0 0 100 100" width="104" height="104" role="img" aria-label="${done} of ${total} done"><circle cx="50" cy="50" r="${R}" fill="none" stroke="rgba(255,255,255,.18)" stroke-width="9"/><circle cx="50" cy="50" r="${R}" fill="none" stroke="#D6CDFA" stroke-width="9" stroke-linecap="round" stroke-dasharray="${C * f} ${C}" transform="rotate(-90 50 50)"/><text x="50" y="56" text-anchor="middle" font-size="22" fill="#fff" font-family="Urbanist, sans-serif">${done}/${total}</text></svg>`;
   }
+  function splitDetails(t) { const m = String(t.details || '').split(/Done when:\s*/i); return { how: (m[0] || '').trim(), done: (m[1] || '').trim() }; }
+  function taskCard(t) {
+    const goal = t.kind === 'goal', phase = goal ? { name: 'Weekly goal' } : (S.d.phases.find(p => p.id === t.phase_id) || {}), col = goal ? '#C0566E' : (PCOL[t.phase_id] || '#8B7CF0'), p2 = partner(), dd = splitDetails(t), left = phase.ends ? daysBetween(today(), phase.ends) : null, open = S.ui.open === t.id;
+    return `<article class="tcard ${t.done ? 'done' : ''}" style="--pc:${col}">
+      <button class="tcheck" data-act="taskToggle" data-id="${esc(t.id)}" data-done="${t.done ? 1 : 0}" aria-label="${t.done ? 'Mark not done' : 'Mark done'}: ${esc(t.title)}" aria-pressed="${t.done}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+      <div class="tbody"><div class="tmeta"><span class="chip" style="background:${col}1A;color:${col}">${esc(phase.name || 'Task')}</span>${!t.done && left != null ? `<span class="${left < 0 ? 'late' : ''}">${left < 0 ? Math.abs(left) + ' days overdue' : left === 0 ? 'phase ends today' : left + ' days left in phase'}</span>` : ''}${(t.rolled_over || 0) > 0 && !t.done ? `<span class="late">carried over ${t.rolled_over}×</span>` : ''}</div>
+        <h3 class="ttitle">${esc(t.title)}</h3>
+        ${dd.done && !t.done ? `<p class="tdone"><b>Done when</b> ${esc(dd.done)}</p>` : ''}
+        ${open && dd.how ? `<p class="thow">${esc(dd.how)}</p>` : ''}
+        ${t.done ? `<p class="small muted" style="margin:4px 0 0">Done ${ago(t.done_at)}</p>` : `<div class="tact">${dd.how ? `<button class="lnk" data-act="openTask" data-id="${esc(t.id)}">${open ? 'Hide steps' : 'How to do it'}</button>` : ''}${p2 ? `<button class="lnk" data-act="reassign" data-id="${esc(t.id)}" data-to="${esc(p2.email)}">Give to ${esc(nameOf(p2.email))}</button>` : ''}<button class="lnk" data-act="snooze" data-id="${esc(t.id)}">Not today</button></div>`}
+      </div></article>`;
+  }
+  function roadmap(full) {
+    const g = gates(), cur = g.find(x => x.state === 'current');
+    const steps = `<ol class="road">${g.map(x => `<li class="${x.state}"><span class="rn">${x.state === 'done' ? '✓' : x.n}</span><span class="rl">${esc(x.name)}</span></li>`).join('')}</ol>`;
+    if (!cur) return `<div class="card">${steps}<p style="margin:12px 0 0"><b>Every checkpoint passed.</b> You’re ready for Ramadan.</p></div>`;
+    const left = cur.checks.filter(c => !c.ok);
+    return `<div class="card road-card">${full ? steps : ''}<div class="cap" style="margin-top:${full ? 18 : 0}px">Checkpoint ${cur.n} of ${g.length}</div><h3 style="font-size:20px;font-weight:500;margin:4px 0 2px">${esc(cur.name)}</h3><p class="small muted" style="margin:0 0 12px">${esc(cur.why)}</p>
+      ${cur.checks.map(c => `<div class="gchk ${c.ok ? 'ok' : ''}"><span aria-hidden="true">${c.ok ? '✓' : '○'}</span><span style="flex:1">${esc(c.label)}${!c.ok && c.task && c.task.assigned_to ? `<span class="small muted"> · on ${isMe(c.task.assigned_to) ? 'your' : esc(nameOf(c.task.assigned_to)) + '’s'} list</span>` : ''}</span>${c.ok ? '' : c.task ? (c.task.assigned_to && isMe(c.task.assigned_to) && c.task.scheduled_for === today() ? '' : `<button class="btn sm" data-act="reassign" data-id="${esc(c.task.id)}" data-to="${esc(S.me)}">Do it today</button>`) : c.go ? `<button class="btn sm" data-go="${c.go}">Open</button>` : ''}</div>`).join('')}
+      <p class="small muted" style="margin:10px 0 0">${left.length} thing${left.length === 1 ? '' : 's'} left before the next checkpoint${g[cur.n] ? ': ' + esc(g[cur.n].name) : ''}.</p></div>`;
+  }
+  function weekBlock() {
+    const d = S.d, ws = weekStart(), mine = (d.reviews || []).find(r => r.week_start === ws && isMe(r.author)), goals = d.tasks.filter(t => t.kind === 'goal' && t.week_start === ws), p2 = partner();
+    if (S.ui.review) return `<div class="card" style="background:#fff;border:1px solid var(--line)"><div class="cap">Week of ${day(ws)}</div><h3 style="font-size:20px;font-weight:500;margin:4px 0 14px">Plan your week</h3>
+      <div class="field"><label for="rv-w">What went well last week?</label><textarea id="rv-w" rows="2" placeholder="e.g. Found 2 tailors, finished the bank account"></textarea></div>
+      <div class="field" style="margin-top:12px"><label for="rv-s">What’s stuck?</label><textarea id="rv-s" rows="2" placeholder="e.g. Waiting on MOCI reply"></textarea></div>
+      <div class="cap" style="margin:16px 0 6px">3 goals for this week</div>${[0, 1, 2].map(i => `<div class="row" style="flex-wrap:nowrap;margin-bottom:8px"><input type="text" id="rv-g${i}" placeholder="Goal ${i + 1}" aria-label="Goal ${i + 1}"><select id="rv-o${i}" aria-label="Who" style="width:120px;flex:none">${opt([[S.me, 'Me']].concat(p2 ? [[p2.email, nameOf(p2.email)]] : []).concat([['', 'Either']]), S.me)}</select></div>`).join('')}
+      <div class="row" style="justify-content:flex-end;margin-top:10px"><button class="btn" data-act="closeReview">Cancel</button><button class="btn solid" data-act="saveReview">Save my week</button></div><p class="small muted" style="margin:8px 0 0">Your goals become tasks at the top of the list for whoever owns them.</p></div>`;
+    const gd = goals.filter(t => t.done).length;
+    return `<div class="card"><div class="row" style="justify-content:space-between;align-items:baseline"><div><div class="cap">This week · ${day(ws)}</div><h3 style="font-size:20px;font-weight:500;margin:4px 0 0">${goals.length ? `${gd} of ${goals.length} goals done` : 'No goals set yet'}</h3></div>${mine ? '' : '<button class="btn sm solid" data-act="openReview">Plan my week</button>'}</div>
+      ${goals.length ? `<div class="meter" style="margin:12px 0"><i style="width:${gd / goals.length * 100}%;background:#8B7CF0"></i></div>${goals.map(t => `<div class="gchk ${t.done ? 'ok' : ''}"><span aria-hidden="true">${t.done ? '✓' : '○'}</span><span style="flex:1">${esc(t.title)}</span><span class="small muted">${t.done ? (isMe(t.done_by) ? 'you' : esc(nameOf(t.done_by))) : t.owner ? (isMe(t.owner) ? 'you' : esc(nameOf(t.owner))) : 'either'}</span></div>`).join('')}` : '<p class="small muted" style="margin:10px 0 0">Every Sunday, spend 2 minutes on wins, what’s stuck and 3 goals. Goals turn into tasks automatically.</p>'}
+      ${mine && (mine.stuck || '').trim() ? `<p class="small" style="margin:12px 0 0"><b>Stuck:</b> ${esc(mine.stuck)}</p>` : ''}</div>`;
+  }
+  function actionsHtml(n) { return (n.actions || []).map(a => `<button class="btn sm ${n.lvl === 'r' ? 'solid' : ''}" ${a.attrs}>${a.label}</button>`).join(''); }
   function vToday() {
     const d = S.d, mine = d.todayList, open = mine.filter(t => !t.done), done = mine.filter(t => t.done);
-    const all = d.tasks.length, allDone = d.tasks.filter(t => t.done).length, toR = daysBetween(today(), RAMADAN);
-    const notes = pmNotes();
-    const myW = weekStats(S.me);
-    const team = (d.members.length ? d.members : [{ email: S.me }]);
-    return ph(`${greet()}, ${nameOf(S.me)}`, `${toR > 0 ? `${toR} days to Ramadan` : 'Ramadan Kareem'} · ${day(today())}`) +
-      `<div class="split"><div>${tiles([
-        { t: 'Your tasks today', v: `${done.length}/${mine.length || 0}`, d: open.length ? `${open.length} left to do` : 'All done for today', dir: done.length ? 'up' : 'dn' },
-        { t: 'Launch plan', v: Math.round(allDone / Math.max(1, all) * 100) + '%', d: `${allDone} of ${all} tasks` },
-        { t: 'Done this week', v: String(myW.doneWeek), d: 'by you', dir: myW.doneWeek ? 'up' : 'dn' },
-        { t: 'Days to Ramadan', v: String(Math.max(0, toR)), d: 'around ' + day(RAMADAN) }
-      ])}</div>
-      <div><h2 style="margin-top:-4px">Team</h2><div class="card" style="padding:10px 22px">${team.map(m => { const ws = weekStats(m.email); return `<div class="person">${av(m.email)}<div><b>${isMe(m.email) ? 'You' : esc(nameOf(m.email))}</b><span>${ws.doneToday} done today · ${ws.lastSeen ? 'active ' + ago(ws.lastSeen) : 'not active yet'}</span></div></div>`; }).join('')}
-        <button class="btn lav" data-go="team" style="width:100%;margin:10px 0 12px">See activity</button></div></div></div>
-      <div class="split sec">
-        <div><h2>Your tasks today</h2><div class="list" style="display:flex;flex-direction:column;gap:8px">
-          ${open.length ? open.map(t => taskCard(t, true)).join('') : `<div class="empty">${allDone === all ? 'Every launch task is done.' : 'Nothing left for today. New tasks load when you finish your batch.'}</div>`}
-          ${done.map(t => taskCard(t, true)).join('')}
-          </div><p class="small muted" style="margin-top:10px">You get ${num(d.settings.tasks_per_day) || 3} tasks a day. Unfinished ones carry over. Finish them all and the next batch loads straight away.</p></div>
-        <div><h2>Project manager’s notes</h2><div class="card" style="padding:6px 18px">${notes.length ? notes.map(n => `<div class="note"><b class="flag ${n[0]}" aria-hidden="true"></b><span>${n[1]}</span></div>`).join('') : '<div class="note"><b class="flag g"></b><span>Everything is on track.</span></div>'}</div></div>
+    const all = d.tasks.length, allDone = d.tasks.filter(t => t.done).length, toR = daysBetween(today(), RAMADAN), p2 = partner();
+    const notes = pmNotes(), focus = notes.slice(0, 5);
+    const nextUp = d.tasks.filter(t => !t.done && !t.assigned_to && (!t.owner || isMe(t.owner))).sort((a, b) => ((d.phases.find(p => p.id === a.phase_id) || {}).sort || 99) - ((d.phases.find(p => p.id === b.phase_id) || {}).sort || 99) || a.sort - b.sort).slice(0, 3);
+    const theirs = p2 ? d.tasks.filter(t => (t.assigned_to || '').toLowerCase() === p2.email.toLowerCase() && t.scheduled_for === today()) : [];
+    return ph(`${greet()}, ${nameOf(S.me)}`) +
+      `<section class="hero"><div class="hero-l">${ring(done.length, mine.length)}</div><div class="hero-r">
+        <div class="cap" style="color:#B9B9C2">Today</div>
+        <div class="hero-t">${mine.length === 0 ? 'Nothing assigned yet' : open.length ? `${open.length} task${open.length === 1 ? '' : 's'} to finish today` : 'Today’s tasks are done'}</div>
+        <div class="hero-s">${toR > 0 ? toR + ' days to Ramadan' : 'Ramadan Kareem'} · launch ${Math.round(allDone / Math.max(1, all) * 100)}% done</div>
+        <div class="bar2"><i style="width:${Math.round(allDone / Math.max(1, all) * 100)}%"></i></div></div></section>
+      <div class="split sec" style="margin-top:22px"><div>
+        <div class="row" style="justify-content:space-between;align-items:baseline"><h2>Your tasks</h2><span class="cap">${done.length} of ${mine.length} done</span></div>
+        <div class="tlist">${open.map(taskCard).join('')}${done.map(taskCard).join('')}${!mine.length ? `<div class="empty">${allDone === all ? 'Every launch task is done.' : 'No tasks yet today.'}</div>` : ''}</div>
+        ${!open.length && mine.length && allDone < all ? '<p class="small muted" style="margin:10px 2px 0">New tasks load automatically when you finish today’s batch.</p>' : ''}
+        ${nextUp.length ? `<h3 class="cap" style="margin:22px 0 8px">Coming up next</h3><div class="next">${nextUp.map(t => `<div><span class="dotc" style="background:${PCOL[t.phase_id] || '#8B7CF0'}"></span>${esc(t.title)}</div>`).join('')}</div>` : ''}
       </div>
-      <div class="sec"><h2>Your partner today</h2><div class="grid g2">${others().length ? others().map(m => { const ws = weekStats(m.email); const theirs = d.tasks.filter(t => (t.assigned_to || '').toLowerCase() === m.email.toLowerCase() && t.scheduled_for === today());
-        return `<div class="card"><div class="row" style="justify-content:space-between"><div class="row">${av(m.email)}<b>${esc(nameOf(m.email))}</b></div><span class="small muted">${ws.lastSeen ? 'Active ' + ago(ws.lastSeen) : 'No activity yet'}</span></div>
-          <p class="small" style="margin:10px 0">${ws.doneToday} done today · ${ws.doneWeek} this week</p>
-          <div style="display:flex;flex-direction:column;gap:6px">${theirs.length ? theirs.map(t => `<div class="small row" style="flex-wrap:nowrap;align-items:flex-start"><span style="color:${t.done ? 'var(--good)' : 'var(--faint)'}">${t.done ? '✓' : '○'}</span><span style="${t.done ? 'color:var(--faint);text-decoration:line-through' : ''}">${esc(t.title)}</span></div>`).join('') : '<span class="small muted">Their tasks appear once they open the app today.</span>'}</div></div>`; }).join('') : '<div class="empty">Add your partner to the members list to see their progress here.</div>'}</div></div>
-      <div class="sec"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Latest activity</h2><button class="btn sm" data-go="team">See all</button></div><div class="card feed" style="padding:4px 18px;margin-top:12px">${d.activity.slice(0, 8).map(feedRow).join('') || '<p class="muted small">Nothing yet.</p>'}</div></div>`;
+      <div>
+        <h2>Next checkpoint</h2>${roadmap(false)}
+        <h2 class="sec">This week</h2>${weekBlock()}
+        <h2 class="sec">What needs you</h2>
+        <div class="card" style="padding:4px 20px">${focus.length ? focus.map(n => `<div class="note"><b class="flag ${n.lvl}" aria-hidden="true"></b><div style="flex:1"><div>${n.html}</div>${n.actions && n.actions.length ? `<div class="row" style="margin-top:10px">${actionsHtml(n)}</div>` : ''}</div></div>`).join('') : '<div class="note"><b class="flag g"></b><div>You’re on track. Keep going with today’s tasks.</div></div>'}</div>
+        ${notes.length > 5 ? `<p class="small muted">+${notes.length - 5} more once these are handled.</p>` : ''}
+        ${p2 ? `<h2 class="sec">${esc(nameOf(p2.email))} today</h2><div class="card" style="padding:10px 20px">${theirs.length ? theirs.map(t => `<div class="pt ${t.done ? 'ok' : ''}"><span aria-hidden="true">${t.done ? '✓' : '○'}</span>${esc(t.title)}</div>`).join('') : '<p class="small muted">Her tasks show here once she opens the HQ today.</p>'}
+          </div>` : ''}
+      </div></div>
+      ${(() => { const f = S.ui.feed || 'all', people = d.members.length ? d.members : [{ email: S.me }]; let list = d.activity; if (f !== 'all') list = list.filter(a => (a.actor || '').toLowerCase() === f.toLowerCase());
+        const n = S.ui.feedN || 12, shown = list.slice(0, n);
+        return `<div class="sec" id="activity"><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Team activity</h2><div class="tabs" style="margin:0;border:none">${[['all', 'Everyone']].concat(people.map(m => [m.email, isMe(m.email) ? 'You' : nameOf(m.email)])).map(o => `<button class="tab" data-act="feed" data-v="${esc(o[0])}" aria-pressed="${o[0] === f}">${esc(o[1])}</button>`).join('')}</div></div>
+          <div class="card feed" style="padding:4px 20px">${shown.map(feedRow).join('') || '<p class="muted small">Nothing yet. Everything either of you does shows up here.</p>'}</div>
+          ${list.length > n ? `<button class="btn" data-act="feedMore" style="margin-top:10px">Show more</button>` : ''}</div>`; })()}`;
   }
-
   function vTeam() {
     const d = S.d, f = S.ui.feed, t = today();
     const people = d.members.length ? d.members : [{ email: S.me, name: 'You' }];
@@ -313,7 +419,8 @@
   function vPlan() {
     const d = S.d, t = today();
     const owners = [['', 'Either of us']].concat(d.members.map(m => [m.email, isMe(m.email) ? 'Me' : nameOf(m.email)]));
-    return ph('Launch plan', 'Every task, by phase. The daily feed hands these out in order; set “Who” to keep a task for one person.') +
+    const revs = S.d.reviews || [];
+    return ph('Launch plan', 'Checkpoints first, then every task by phase.') + `<h2>Launch roadmap</h2>${roadmap(true)}<h2 class="sec">Tasks by phase</h2>` +
       d.phases.map(p => { const list = d.tasks.filter(x => x.phase_id === p.id).sort((a, b) => a.sort - b.sort), done = list.filter(x => x.done).length; const state = t < p.starts ? 'Upcoming' : t > p.ends ? (done === list.length ? 'Complete' : 'Overdue') : 'In progress';
         return `<div class="card sec" style="margin-top:14px"><div class="row" style="justify-content:space-between"><div><h2 style="margin:0">${esc(p.name)}</h2><p class="small muted" style="margin:2px 0 0">${day(p.starts)} – ${day(p.ends)} · ${done}/${list.length} done</p></div><span class="pill ${state === 'Complete' ? 'ok' : state === 'Overdue' ? 'bad' : state === 'In progress' ? 'gold' : ''}">${state}</span></div>
           <div class="meter" style="margin:12px 0 6px"><i style="width:${list.length ? done / list.length * 100 : 0}%"></i></div>
@@ -322,70 +429,95 @@
             <td class="small muted" style="white-space:nowrap">${x.done ? `${isMe(x.done_by) ? 'You' : esc(nameOf(x.done_by))} · ${ago(x.done_at)}` : x.assigned_to ? `${isMe(x.assigned_to) ? 'Your' : esc(nameOf(x.assigned_to)) + '’s'} list` : ''}</td>
             <td style="width:150px"><select aria-label="Who" data-act="owner" data-id="${esc(x.id)}">${opt(owners, x.owner || '')}</select></td>
             <td style="width:44px"><button class="x" data-act="delTask" data-id="${esc(x.id)}" aria-label="Delete task">✕</button></td></tr>`).join('')}</tbody></table></div>
-          <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input type="text" id="nt-${p.id}" placeholder="Add a task to ${esc(p.name)}" aria-label="New task"><button class="btn sm" data-act="addTask" data-ph="${p.id}">Add</button></div></div>`; }).join('');
+          <div class="row" style="margin-top:8px;flex-wrap:nowrap"><input type="text" id="nt-${p.id}" placeholder="Add a task to ${esc(p.name)}" aria-label="New task"><button class="btn sm" data-act="addTask" data-ph="${p.id}">Add</button></div></div>`; }).join('') + (revs.length ? `<h2 class="sec">Weekly reviews</h2><div class="clist">${revs.slice(0, 12).map(r => `<article class="crow" style="display:block"><div class="cap">Week of ${day(r.week_start)} · ${isMe(r.author) ? 'you' : esc(nameOf(r.author))}</div>${r.wins ? `<p style="margin:8px 0 0"><b>Went well:</b> ${esc(r.wins)}</p>` : ''}${r.stuck ? `<p style="margin:6px 0 0"><b>Stuck:</b> ${esc(r.stuck)}</p>` : ''}${(r.goals || []).length ? `<p style="margin:6px 0 0"><b>Goals:</b> ${(r.goals || []).map(esc).join(' · ')}</p>` : ''}</article>`).join('')}</div>` : '');
   }
 
   /* ---------- money ---------- */
   function band(p) { const st = S.d.settings, t = `${num(st.target_min)}–${num(st.target_max)} KD`; return { 'in range': `<span class="pill ok">In ${t}</span>`, 'above range': `<span class="pill bad">Above ${t}</span>`, 'below range': `<span class="pill gold">Below ${t}</span>` }[p.range_status] || '<span class="pill">No costs yet</span>'; }
+  const activeStyles = () => S.d.styles.filter(x => x.active !== false).sort((a, b) => a.sort - b.sort);
   const styleName = id => (S.d.styles.find(s => s.id === Number(id)) || {}).name || '';
   function vMoney() {
-    const s = S.d.summary || {}, used = Math.min(100, num(s.budget_used) * 100), max = Math.max(1, ...S.d.spend.map(c => num(c.spent))), spend = S.d.spend.filter(c => num(c.spent) > 0);
+    const s = S.d.summary || {}, spend = S.d.spend.filter(c => num(c.spent) > 0);
     const exs = S.d.expenses, ords = S.d.orders.filter(o => o.status !== 'Cancelled');
+    const catCols = ['#1E1E21', '#8B7CF0', '#D6CDFA', '#6E6E78', '#B9B9C2', '#3A8D74'];
+    const empty = t => `<p class="muted" style="padding:36px 0;text-align:center;margin:0">${t}</p>`;
+    // cash flow: cumulative spent vs revenue
     const dates = exs.map(e => e.spent_on).concat(ords.map(o => o.ordered_on)).filter(Boolean).sort();
     let flow = '';
     if (dates.length) {
-      const start = Date.parse(dates[0]), end = Math.max(Date.parse(today()), start + 7 * 864e5), weeks = Math.min(12, Math.max(2, Math.ceil((end - start) / (7 * 864e5)) + 1));
+      const start = Date.parse(dates[0]) - 7 * 864e5, end = Math.max(Date.parse(today()), start + 14 * 864e5), weeks = Math.min(12, Math.max(3, Math.ceil((end - start) / (7 * 864e5)) + 1));
       const pts = Array.from({ length: weeks }, (_, i) => new Date(start + i * 7 * 864e5).toISOString().slice(0, 10));
       const cum = (arr, key, val) => pts.map(p => arr.filter(x => x[key] <= p).reduce((a, x) => a + num(x[val]), 0));
       flow = areaChart([{ name: 'Spent', color: '#1E1E21', values: cum(exs, 'spent_on', 'amount') }, { name: 'Revenue', color: '#8B7CF0', fill: 'rgba(214,205,250,.6)', values: cum(ords, 'ordered_on', 'order_total') }], pts.map(day), short);
     }
-    return ph('Money', 'Updated by the database whenever either of you adds an expense or order') +
+    const t0 = Date.parse(today()), wk = Array.from({ length: 8 }, (_, i) => new Date(t0 - (7 - i) * 7 * 864e5).toISOString().slice(0, 10));
+    const wSpend = wk.map((w, i) => exs.filter(e => e.spent_on >= w && (i === 7 || e.spent_on < wk[i + 1])).reduce((a, e) => a + num(e.amount), 0));
+    const cats = spend.slice(0, 6);
+    const pr = S.d.pricing, maxC = Math.max(1, ...pr.map(p => Math.max(p.has_costs ? num(p.full_cost) : 0, num(p.max_cost_for_target)))) * 1.1;
+    const bySet = activeStyles().map(st => ords.filter(o => Number(o.style_id) === st.id).reduce((a, o) => a + num(o.order_total), 0));
+    const stCount = STATUSES.filter(x => x !== 'Cancelled').map(x => [x, S.d.orders.filter(o => o.status === x).length]), stMax = Math.max(1, ...stCount.map(x => x[1]));
+    const ch = CHANNELS.map(c => [c, ords.filter(o => o.channel === c).length]).filter(x => x[1]);
+    return ph('Money', 'Calculated by the database whenever either of you adds an expense or an order') +
       `<div class="split"><div>${tiles([
         { t: 'Spent so far', v: kd(s.spent), d: `${pct(s.budget_used) === '—' ? '0%' : pct(s.budget_used)} of ${kd(s.budget)} budget`, dir: num(s.budget_used) > .9 ? 'dn' : 'up' },
         { t: 'Revenue', v: kd(s.revenue), d: `${num(s.orders)} order${num(s.orders) === 1 ? '' : 's'} · ${num(s.sets_sold)} sets` },
         { t: 'Profit on sales', v: kd(s.profit), dir: num(s.profit) > 0 ? 'up' : 'dn', d: s.sets_to_break_even != null ? (num(s.net_position) >= 0 ? 'Spend earned back' : `${s.sets_to_break_even} sets to break even`) : 'No sales yet' },
-        { t: 'Still owed', v: kd(s.owed), d: num(s.collected) ? `${kd(s.collected)} collected` : "Nothing collected yet" }
+        { t: 'Still owed', v: kd(s.owed), d: num(s.collected) ? `${kd(s.collected)} collected` : 'Nothing collected yet' }
       ])}</div>
       <div><h2 style="margin-top:-4px">Budget</h2><div class="card" style="text-align:center">${donut([{ v: Math.min(num(s.spent), num(s.budget) || num(s.spent)), c: '#1E1E21' }, { v: Math.max(0, num(s.budget_left)), c: '#D6CDFA' }], pct(s.budget_used) === '—' ? '0%' : pct(s.budget_used), 'used')}
         <div class="row" style="justify-content:space-around;margin-top:8px"><div><div style="font-size:20px">${kd(s.spent)}</div><div class="cap">Spent</div></div><div><div style="font-size:20px">${kd(s.budget_left)}</div><div class="cap">Left</div></div></div></div></div></div>
+
       <div class="split sec"><div><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Cash flow</h2><div class="legend"><span><i style="background:#1E1E21"></i>Spent</span><span><i style="background:#8B7CF0"></i>Revenue</span></div></div>
-        <div class="chart">${flow || '<p class="muted" style="padding:40px 0;text-align:center;margin:0">Appears once you log expenses or orders.</p>'}</div></div>
-      <div><h2>Where it went</h2><div class="card">${spend.length ? spend.map(c => `<div class="hbar"><span class="small">${esc(c.category)}</span><div class="meter" style="height:8px"><i style="width:${num(c.spent) / max * 100}%;background:${c.kind === 'per_set' ? '#1E1E21' : '#8B7CF0'}"></i></div><span class="small" style="text-align:right">${kd(c.spent)}</span></div>`).join('') + '<p class="cap" style="margin:10px 0 0">Black = set costs · lilac = overheads</p>' : '<p class="muted small" style="margin:0">Appears once you log expenses.</p>'}</div></div></div>
-      <div class="sec"><h2>Prices right now</h2><div class="grid g5">${S.d.pricing.map(p => `<div class="card"><h3>${esc(p.name)}</h3><div style="font-family:var(--serif);font-size:30px;line-height:1.1">${num(p.final_price) ? kd(p.final_price) : '—'}</div><p class="small muted" style="margin:4px 0 8px">${num(p.final_price) ? `Cost ${kd(p.full_cost)} · margin ${pct(p.margin)}` : `Target ${num(p.target_price)} KD`}</p>${band(p)}</div>`).join('')}</div></div>`;
+        <div class="chart">${flow || empty('Appears once you log expenses or orders.')}</div></div>
+        <div><h2>Spend by category</h2><div class="card">${cats.length ? `<div style="max-width:200px;margin:0 auto 10px">${donut(cats.map((c, i) => ({ v: num(c.spent), c: catCols[i] })), short(num(s.spent)), 'KD spent')}</div><div style="display:grid;gap:8px">${cats.map((c, i) => `<div class="row small" style="justify-content:space-between;flex-wrap:nowrap"><span><i class="sw" style="background:${catCols[i]}"></i>${esc(c.category)}</span><span>${kd(c.spent)} · <b style="font-weight:600">${Math.round(num(c.spent) / Math.max(1, num(s.spent)) * 100)}%</b></span></div>`).join('')}</div>` : empty('Appears once you log expenses.')}</div></div></div>
+
+      <div class="sec"><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Cost per set vs. the most it can cost</h2><div class="legend"><span><i style="background:#1E1E21"></i>Your cost</span><span><i style="background:#8B7CF0;border-radius:2px"></i>Max to sell in range</span></div></div>
+        <div class="card">${pr.map(p => { const c = p.has_costs ? num(p.full_cost) : 0, over = c > num(p.max_cost_for_target); return `<div class="cvt"><div class="cvt-l"><b>${esc(p.name.replace(' set', ''))}</b><span>${num(p.target_price)} KD target${num(p.final_price) ? ` · sells at ${kd(p.final_price)}` : ''}</span></div><div class="cvt-b"><i style="width:${c / maxC * 100}%;background:${over ? 'var(--bad)' : '#1E1E21'}"></i><em style="left:${num(p.max_cost_for_target) / maxC * 100}%"></em></div><div class="cvt-r">${p.has_costs ? `<b style="font-weight:500;color:${over ? 'var(--bad)' : 'inherit'}">${kd(c)}</b>` : '<span style="display:inline">no costs yet</span>'}<span>max ${kd(p.max_cost_for_target)}</span></div></div>`; }).join('')}
+        <p class="small muted" style="margin:12px 0 0">A set turns red when it costs more than it can to sell inside your price range. Log fabric and sewing per set in Expenses to fill this in.</p></div></div>
+
+      <div class="grid g2 sec"><div><h2>Spending per week</h2><div class="chart">${wSpend.some(Boolean) ? barChart(wk.map(day), wSpend, short, '#1E1E21') : empty('No spending in the last 8 weeks.')}</div></div>
+        <div><h2>Revenue by set</h2><div class="chart">${bySet.some(Boolean) ? barChart(activeStyles().map(x => x.name.split(' ')[0]), bySet, short, '#8B7CF0') : empty('No sales yet.')}</div></div></div>
+
+      <div class="grid g2 sec"><div><h2>Order pipeline</h2><div class="card">${stCount.map(([n, c]) => `<div class="hbar" style="grid-template-columns:130px 1fr 28px"><span class="small">${esc(n)}</span><div class="meter" style="height:8px"><i style="width:${c / stMax * 100}%;background:#8B7CF0"></i></div><b class="small" style="text-align:right;font-weight:600">${c}</b></div>`).join('')}</div></div>
+        <div><h2>Where orders come from</h2><div class="card">${ch.length ? ch.map(([n, c], i) => `<div class="hbar" style="grid-template-columns:130px 1fr 28px"><span class="small">${esc(n)}</span><div class="meter" style="height:8px"><i style="width:${c / Math.max(1, ...ch.map(x => x[1])) * 100}%;background:${catCols[i]}"></i></div><b class="small" style="text-align:right;font-weight:600">${c}</b></div>`).join('') : empty('No orders yet.')}</div></div></div>
+      <div class="sec" id="pricing">${vPricingBlock()}</div>`;
   }
   function vExpenses() {
     const f = S.ef, cats = S.d.categories, kindOf = n => (cats.find(c => c.name === n) || {}).kind, cat = f.category || cats[0].name, isOver = kindOf(cat) === 'overhead', scope = isOver ? 'general' : (f.scope || 'style');
-    return ph('Expenses', 'Log every payment. For per-set costs, enter how many sets it covers so prices update.') +
-      `<div class="form"><div class="field"><label for="e-date">Date</label><input type="date" id="e-date" value="${esc(f.spent_on || today())}"></div>
+    const total = S.d.expenses.reduce((a, e) => a + num(e.amount), 0);
+    const form = `<div class="form"><div class="field"><label for="e-amt">Amount paid (KD)</label><input type="number" inputmode="decimal" min="0" step="0.001" id="e-amt" value="${esc(f.amount || '')}"></div>
         <div class="field"><label for="e-cat">Category</label><select id="e-cat" data-keep="category"><optgroup label="Cost of the sets">${opt(cats.filter(c => c.kind === 'per_set').map(c => c.name), cat)}</optgroup><optgroup label="Overheads">${opt(cats.filter(c => c.kind === 'overhead').map(c => c.name), cat)}</optgroup></select></div>
         ${isOver ? '' : `<div class="field"><label for="e-scope">For</label><select id="e-scope" data-keep="scope">${opt([['style', 'One set'], ['all_styles', 'All sets (shared)']], scope)}</select></div>`}
-        ${!isOver && scope === 'style' ? `<div class="field"><label for="e-style">Which set</label><select id="e-style">${opt(S.d.styles.map(s => [s.id, s.name]), f.style_id)}</select></div>` : ''}
-        <div class="field wide"><label for="e-item">What was it</label><input type="text" id="e-item" placeholder="e.g. 40 m cream linen-look fabric" value="${esc(f.item || '')}"></div>
-        <div class="field"><label for="e-sup">Supplier</label><input type="text" id="e-sup" value="${esc(f.supplier || '')}"></div>
-        <div class="field"><label for="e-amt">Amount paid (KD)</label><input type="number" inputmode="decimal" min="0" step="0.001" id="e-amt" value="${esc(f.amount || '')}"></div>
+        ${!isOver && scope === 'style' ? `<div class="field"><label for="e-style">Which set</label><select id="e-style">${opt(activeStyles().map(s => [s.id, s.name]), f.style_id)}</select></div>` : ''}
         ${isOver ? '' : `<div class="field"><label for="e-sets">Sets it covers</label><input type="number" inputmode="numeric" min="1" step="1" id="e-sets" value="${esc(f.sets_covered || '')}"></div>`}
-        <button class="btn solid" data-act="addExpense">Add expense</button>
-        <p class="hint">${isOver ? 'Overheads are spread across your planned number of sets (Settings).' : 'Example: KD 120 of fabric that makes 30 tops = KD 4 per set.'}</p></div>
-      <div class="sec">${S.d.expenses.length ? `<div class="tw"><table><thead><tr><th>Date</th><th>Category</th><th>For</th><th>Item</th><th>Supplier</th><th class="n">Paid</th><th class="n">Sets</th><th class="n">Per set</th><th>Added by</th><th></th></tr></thead><tbody>
-        ${S.d.expenses.map(e => `<tr><td>${day(e.spent_on)}</td><td>${esc(e.category)}</td><td class="small">${e.scope === 'style' ? esc(styleName(e.style_id)) : e.scope === 'all_styles' ? 'All sets' : 'General'}</td><td>${esc(e.item)}</td><td class="small">${esc(e.supplier)}</td><td class="n">${kd(e.amount)}</td><td class="n">${num(e.sets_covered) || '—'}</td><td class="n">${num(e.sets_covered) ? kd(num(e.amount) / num(e.sets_covered)) : '—'}</td><td class="small muted">${isMe(e.created_by) ? 'You' : esc(nameOf(e.created_by))}</td><td><button class="x" data-act="delExpense" data-id="${esc(e.id)}" aria-label="Delete expense">✕</button></td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="empty">No expenses yet.</div>'}</div>`;
+        <div class="field wide"><label for="e-item">What was it</label><input type="text" id="e-item" placeholder="e.g. 40 m cream fabric" value="${esc(f.item || '')}"></div>
+        <div class="field"><label for="e-sup">Supplier</label><input type="text" id="e-sup" value="${esc(f.supplier || '')}"></div>
+        <div class="field"><label for="e-date">Date</label><input type="date" id="e-date" value="${esc(f.spent_on || today())}"></div>
+        <button class="btn solid" data-act="addExpense">Save expense</button>
+        <p class="hint">${isOver ? 'Overheads are spread across your planned number of sets.' : 'Example: KD 120 of fabric that makes 30 tops = KD 4 per set.'}</p></div>`;
+    const forOf = e => e.scope === 'style' ? styleName(e.style_id).replace(' set', '') : e.scope === 'all_styles' ? 'All sets' : 'General';
+    return ph('Expenses', `${S.d.expenses.length} payment${S.d.expenses.length === 1 ? '' : 's'} · ${kd(total) === '—' ? 'KD 0' : kd(total)} total`) + addBox('exp', 'Add expense', form, !S.d.expenses.length) +
+      `<div class="sec" style="margin-top:20px">${S.d.expenses.length ? `<div class="clist">${S.d.expenses.map(e => `<article class="crow"><div class="crow-m"><div class="crow-t">${esc(e.item || e.category)}</div><div class="crow-s"><span class="chip" style="background:${kindOf(e.category) === 'per_set' ? '#1E1E211A' : '#8B7CF01F'};color:${kindOf(e.category) === 'per_set' ? '#1E1E21' : '#4B3FA0'}">${esc(e.category)}</span>${esc(forOf(e))}${e.supplier ? ' · ' + esc(e.supplier) : ''}</div><div class="crow-s">${day(e.spent_on)} · ${isMe(e.created_by) ? 'you' : esc(nameOf(e.created_by))}</div></div>
+        <div class="crow-r"><div class="crow-v">${kd(e.amount)}</div>${num(e.sets_covered) ? `<div class="crow-s">${kd(num(e.amount) / num(e.sets_covered))} / set</div>` : ''}<button class="x" data-act="delExpense" data-id="${esc(e.id)}" aria-label="Delete expense">✕</button></div></article>`).join('')}</div>` : ''}</div>`;
   }
   function vOrders() {
-    const f = S.of;
-    return ph('Orders', 'Pick a set and the current price fills in. Only type a price if you charged something different.') +
-      `<div class="form"><div class="field"><label for="o-date">Date</label><input type="date" id="o-date" value="${esc(f.ordered_on || today())}"></div><div class="field wide"><label for="o-cust">Customer</label><input type="text" id="o-cust" value="${esc(f.customer || '')}"></div><div class="field"><label for="o-ch">Channel</label><select id="o-ch">${opt(CHANNELS, f.channel || 'Instagram')}</select></div><div class="field wide"><label for="o-style">Set</label><select id="o-style">${opt(S.d.styles.map(s => [s.id, s.name]), f.style_id)}</select></div><div class="field"><label for="o-qty">Sets</label><input type="number" inputmode="numeric" min="1" id="o-qty" value="${esc(f.qty || 1)}"></div><div class="field"><label for="o-price">Price per set (optional)</label><input type="number" inputmode="decimal" min="0" step="0.5" id="o-price" placeholder="automatic"></div><div class="field"><label for="o-disc">Discount %</label><input type="number" inputmode="numeric" min="0" max="100" id="o-disc" value="0"></div><div class="field"><label for="o-dep">Deposit (KD)</label><input type="number" inputmode="decimal" min="0" step="0.5" id="o-dep" value="0"></div><div class="field wide"><label for="o-emb">Embroidery</label><input type="text" id="o-emb" placeholder="e.g. family initials"></div><button class="btn solid" data-act="addOrder">Add order</button></div>
-      <div class="sec">${S.d.orders.length ? `<div class="tw"><table><thead><tr><th>Date</th><th>Customer</th><th>Set</th><th class="n">Qty</th><th class="n">Per set</th><th class="n">Total</th><th class="n">Deposit</th><th class="n">Balance</th><th class="n">Profit</th><th>Status</th><th></th></tr></thead><tbody>
-        ${S.d.orders.map(o => `<tr><td>${day(o.ordered_on)}</td><td>${esc(o.customer)}<div class="small muted">${esc(o.channel)}${o.embroidery ? ' · ' + esc(o.embroidery) : ''}</div></td><td class="small">${esc(o.style_name)}</td><td class="n">${o.qty}</td><td class="n">${kd(o.price_per_set)}</td><td class="n"><b>${kd(o.order_total)}</b></td><td class="n" style="min-width:100px"><input type="number" min="0" step="0.5" aria-label="Deposit" value="${esc(num(o.deposit))}" data-act="dep" data-id="${esc(o.id)}"></td><td class="n" style="color:${num(o.balance_due) > 0 ? 'var(--bad)' : 'var(--good)'}">${num(o.balance_due) > 0 ? kd(o.balance_due) : 'Paid'}</td><td class="n">${kd(o.profit)}</td><td><select aria-label="Status" data-act="status" data-id="${esc(o.id)}">${opt(STATUSES, o.status)}</select></td><td><button class="x" data-act="delOrder" data-id="${esc(o.id)}" aria-label="Delete order">✕</button></td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="empty">No orders yet.</div>'}</div>`;
+    const f = S.of, ords = S.d.orders;
+    const owed = ords.filter(o => o.status !== 'Cancelled').reduce((a, o) => a + Math.max(0, num(o.balance_due)), 0);
+    const form = `<div class="form"><div class="field wide"><label for="o-cust">Customer</label><input type="text" id="o-cust" value="${esc(f.customer || '')}"></div><div class="field wide"><label for="o-style">Set</label><select id="o-style">${opt(activeStyles().map(s => [s.id, s.name]), f.style_id)}</select></div><div class="field"><label for="o-size">Size</label><select id="o-size">${opt([['', 'Choose']].concat(SIZES.map(z => [z, z])), f.size || '')}</select></div><div class="field"><label for="o-color">Color</label><input type="text" id="o-color" list="colors-dl" value="${esc(f.color || 'Cream')}"><datalist id="colors-dl">${[...new Set((S.d.stock || []).map(x => x.color).concat(['Cream', 'Sand', 'Taupe']))].map(c => `<option value="${esc(c)}">`).join('')}</datalist></div><div class="field"><label for="o-qty">Sets</label><input type="number" inputmode="numeric" min="1" id="o-qty" value="${esc(f.qty || 1)}"></div><div class="field"><label for="o-dep">Deposit (KD)</label><input type="number" inputmode="decimal" min="0" step="0.5" id="o-dep" value="0"></div><div class="field"><label for="o-ch">Channel</label><select id="o-ch">${opt(CHANNELS, f.channel || 'Instagram')}</select></div><div class="field"><label for="o-price">Price per set</label><input type="number" inputmode="decimal" min="0" step="0.5" id="o-price" placeholder="automatic"></div><div class="field"><label for="o-disc">Discount %</label><input type="number" inputmode="numeric" min="0" max="100" id="o-disc" value="0"></div><div class="field wide"><label for="o-emb">Embroidery</label><input type="text" id="o-emb" placeholder="e.g. family initials"></div><div class="field"><label for="o-date">Date</label><input type="date" id="o-date" value="${esc(f.ordered_on || today())}"></div><button class="btn solid" data-act="addOrder">Save order</button><p class="hint">Leave “Price per set” empty to use the current price automatically.</p></div>`;
+    const stCol = st => ({ New: '#8B7CF0', 'Deposit paid': '#4F7BD9', Delivered: '#2F7A4F', Cancelled: '#A3A3AD' }[st] || '#D08C3A');
+    return ph('Orders', `${ords.length} order${ords.length === 1 ? '' : 's'} · ${owed ? kd(owed) + ' still owed' : 'nothing owed'}`) + addBox('ord', 'Add order', form, !ords.length) +
+      `<div class="sec" style="margin-top:20px">${ords.length ? `<div class="clist">${ords.map(o => `<article class="crow ord" style="--sc:${stCol(o.status)}"><div class="crow-m"><div class="crow-t">${esc(o.customer)}</div><div class="crow-s">${o.qty} × ${esc((o.style_name || '').replace(' set', ''))}${o.size ? ' · ' + esc(o.size) : ''}${o.color ? ' · ' + esc(o.color) : ''} · ${esc(o.channel)}${o.embroidery ? ' · ' + esc(o.embroidery) : ''}</div><div class="crow-s">${day(o.ordered_on)} · profit ${kd(o.profit)}</div>
+        <div class="row" style="margin-top:10px;flex-wrap:nowrap"><select aria-label="Status" data-act="status" data-id="${esc(o.id)}" class="stsel">${opt(STATUSES, o.status)}</select><label class="dep"><span>Deposit</span><input type="number" min="0" step="0.5" aria-label="Deposit" value="${esc(num(o.deposit))}" data-act="dep" data-id="${esc(o.id)}"></label></div></div>
+        <div class="crow-r"><div class="crow-v">${kd(o.order_total)}</div><div class="crow-s" style="color:${num(o.balance_due) > 0 ? 'var(--bad)' : 'var(--good)'}">${num(o.balance_due) > 0 ? kd(o.balance_due) + ' owed' : 'Paid'}</div><button class="x" data-act="delOrder" data-id="${esc(o.id)}" aria-label="Delete order">✕</button></div></article>`).join('')}</div>` : ''}</div>`;
   }
-  function vPricing() {
-    const st = S.d.settings, cats = S.d.categories.filter(c => c.kind === 'per_set');
-    return ph('Pricing', `Average cost per set × ${num(st.multiplier)}, rounded up to the nearest ${num(st.round_to)} KD.`) +
-      `<div class="tw"><table><thead><tr><th>Set</th>${cats.map(c => `<th class="n">${esc(c.name)}</th>`).join('')}<th class="n">Overheads</th><th class="n">Full cost</th><th class="n">Max cost</th><th class="n">Suggested</th><th>Your price</th><th class="n">Margin</th><th class="n">Pack of ${num(st.pack_size)}</th><th>Target</th></tr></thead><tbody>
-      ${S.d.pricing.map(p => { const b = p.breakdown || {}; return `<tr><td><b>${esc(p.name)}</b></td>${cats.map(c => `<td class="n">${kd(b[c.name])}</td>`).join('')}<td class="n">${kd(p.overhead_per_set)}</td><td class="n"><b>${kd(p.full_cost)}</b></td><td class="n muted">${kd(p.max_cost_for_target)}</td><td class="n">${p.has_costs ? kd(p.suggested_price) : '—'}</td><td style="min-width:110px"><input type="number" min="0" step="0.5" placeholder="automatic" aria-label="Your price for ${esc(p.name)}" value="${p.price_override ? esc(num(p.price_override)) : ''}" data-act="override" data-id="${p.style_id}"></td><td class="n" style="color:${num(p.final_price) && num(p.margin) < 0.4 ? 'var(--bad)' : 'inherit'}">${pct(p.margin)}</td><td class="n">${kd(p.pack_price)}</td><td>${band(p)}</td></tr>`; }).join('')}
-      </tbody></table></div><p class="small muted">“Max cost” is the most a set can cost you all-in to hit its target. Type “Your price” to override; clear it to go back to automatic.</p>`;
+  function vPricingBlock() {
+    const st = S.d.settings;
+    return `<div class="row" style="justify-content:space-between;align-items:baseline"><h2>Prices</h2><span class="cap">cost × ${num(st.multiplier)}, rounded up</span></div>
+      <div class="plist">${S.d.pricing.map(p => `<article class="pcard"><div class="row" style="justify-content:space-between;flex-wrap:nowrap;align-items:flex-start"><div><b>${esc(p.name)}</b><div class="small muted">${p.has_costs ? `Cost ${kd(p.full_cost)} · margin ${pct(p.margin)}` : 'Log its fabric and sewing to price it'}</div></div>${band(p)}</div>
+        <div class="row" style="margin-top:12px;justify-content:space-between;flex-wrap:nowrap;align-items:flex-end"><div><div class="cap">Suggested</div><div class="pv">${p.has_costs ? kd(p.suggested_price) : '—'}</div></div><div><div class="cap">Pack of ${num(st.pack_size)}</div><div class="pv" style="font-size:20px">${kd(p.pack_price)}</div></div><label class="field" style="width:110px"><span class="cap">Your price</span><input type="number" min="0" step="0.5" placeholder="auto" aria-label="Your price for ${esc(p.name)}" value="${p.price_override ? esc(num(p.price_override)) : ''}" data-act="override" data-id="${p.style_id}"></label></div></article>`).join('')}</div>
+      <p class="small muted">Type “Your price” to override the suggestion; clear it to go back to automatic.</p>`;
   }
-
+  function vPricing() { return vMoney(); }
   /* ---------- product ---------- */
 function sketch(o){
   // simple front flat: top + straight pants. o: {len, close, panels, belt, kimono, stripe, sleeve}
@@ -418,13 +550,13 @@ const DROP=[
  {name:'Tie Top set',price:16,role:'Nannies: the hero piece, easiest to move and lift children in',
   top:'Hip-length top, mandarin collar, asymmetric placket with gold piping and hidden snaps, long sleeves with piped turn-back cuff, self-fabric tie belt (or a taupe contrast belt)',
   pants:'Straight-leg pants in sand with a thin cream piping down the side seam',
-  details:'Crescent chest embroidery, about 3.5 cm, one thread colour.',
+  details:'Crescent chest embroidery, about 3.5 cm, one thread color.',
   ref:'Your Style 1 board, with New Forms’ piped straight pants instead of sherwal',
   o:{len:250,close:'asym',belt:true,beltColor:'#A89A88',base:'#EFE8DC',pant:'#D9C8AE'}},
  {name:'Side-Button Tunic set',price:16,role:'Housekeepers: covers more, stays neat all day',
   top:'Mid-thigh tunic, cream front with sand side panels, offset placket with four brushed-gold buttons, short or long sleeves, side slits',
-  pants:'Straight-leg pants in the side-panel colour with cream side piping',
-  details:'Crescent chest embroidery. Two-tone panels make each colourway look intentional.',
+  pants:'Straight-leg pants in the side-panel color with cream side piping',
+  details:'Crescent chest embroidery. Two-tone panels make each colorway look intentional.',
   ref:'New Forms two-tone side-button tunic, with your mandarin collar and gold piping',
   o:{len:290,close:'side',panels:true,base:'#F6F1E8',side:'#D9C8AE',pant:'#D9C8AE'}},
  {name:'Wrap Top set',price:18,role:'Serving at iftar and ghabgas',
@@ -442,33 +574,84 @@ const DROP=[
 ];
 
   function vDrop() {
-    const st = S.d.settings, m = num(st.multiplier) || 1, d = DROP[Math.min(S.ui.drop, DROP.length - 1)];
+    const st = S.d.settings, m = num(st.multiplier) || 1, sets = activeStyles(), removed = S.d.styles.filter(x => x.active === false);
+    const ideas = (S.d.assets || []).filter(a => a.slot === 'drop_idea').sort((a, b) => (b.likes || []).length - (a.likes || []).length);
+    const sel = sets[Math.min(S.ui.drop || 0, Math.max(0, sets.length - 1))];
     const sizes = [['S', '86–90', '68–72', '92–96'], ['M', '91–96', '73–78', '97–102'], ['L', '97–102', '79–84', '103–108'], ['XL', '103–110', '85–92', '109–116'], ['XXL', '111–118', '93–100', '117–124'], ['3XL', '119–126', '101–108', '125–132']];
-    const p = S.d.pricing.find(x => x.name === d.name);
-    return ph('Ramadan drop', 'Five top-and-pants sets, 14–20 KD. Hand this page to your tailor.') +
-      `<div class="tabs" role="group" aria-label="Sets">${DROP.map((x, i) => `<button class="tab" data-act="drop" data-i="${i}" aria-pressed="${x === d}">${esc(x.name.replace(' set', ''))}</button>`).join('')}</div>
-      <div class="grid g2"><div class="card" style="display:flex;align-items:center;justify-content:center;padding:28px">${sketch(Object.assign({ name: d.name }, d.o))}</div>
-      <div class="card"><div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap"><div><h2 style="margin:0">${esc(d.name)}</h2><p class="muted" style="margin:2px 0 0">${esc(d.role)}</p></div><div style="text-align:right;flex:none"><div style="font-family:var(--serif);font-size:32px;line-height:1">${d.price} KD</div><div class="small muted">target</div></div></div>
-        <div style="margin-top:16px"><h3>Top</h3><p style="margin:0 0 12px">${esc(d.top)}</p><h3>Pants</h3><p style="margin:0 0 12px">${esc(d.pants)}</p><h3>Details</h3><p style="margin:0 0 12px">${esc(d.details)}</p><h3>Reference</h3><p class="small muted" style="margin:0">${esc(d.ref)}</p></div>
-        <div style="margin-top:14px;background:var(--hover);border-radius:8px;padding:12px" class="small">Must cost <b>${kd(d.price / m)}</b> or less all-in to sell at ${d.price} KD.${p && num(p.full_cost) && p.has_costs ? ` Current cost: <b>${kd(p.full_cost)}</b> ${band(p)}` : ''}</div></div></div>
-      <div class="grid g2 sec"><div class="card"><h3>Shared across every set</h3><div class="small" style="display:grid;gap:6px"><span>One straight-leg pant pattern for all five sets, elastic back waist, side pockets.</span><span>Mandarin collar ~3 cm with gold or champagne piping (except the kimono).</span><span>Hidden snaps or flat buttons, nothing that catches on children.</span><span>Pre-washed fabric, overlocked seams, side slits.</span><span>Cream, sand and taupe, gold only as detail.</span></div></div>
+    let detail = '<div class="empty">No sets in the drop yet. Add one below or turn an idea into a set.</div>';
+    if (sel) {
+      const spec = DROP.find(x => x.name === sel.name), p = S.d.pricing.find(x => x.style_id === sel.id), img = sel.image_path && S.urls[sel.image_path];
+      const priceBox = `<div style="margin-top:14px;background:var(--panel);padding:12px" class="small">Must cost <b>${kd(num(sel.target_price) / m)}</b> or less all-in to sell at ${num(sel.target_price)} KD.${p && p.has_costs ? ` Current cost: <b>${kd(p.full_cost)}</b> ${band(p)}` : ''}</div>`;
+      detail = `<div class="grid g2"><div class="card" style="display:flex;align-items:center;justify-content:center;padding:24px;min-height:320px">${img ? `<img src="${esc(img)}" alt="${esc(sel.name)}" style="max-width:100%;max-height:420px;object-fit:contain">` : spec ? sketch(Object.assign({ name: spec.name }, spec.o)) : '<span class="muted">No picture yet</span>'}</div>
+        <div class="card" style="background:#fff;border:1px solid var(--line)"><div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap"><div><h2 style="margin:0">${esc(sel.name)}</h2>${spec ? `<p class="muted" style="margin:2px 0 0">${esc(spec.role)}</p>` : ''}</div>
+          <label class="field" style="width:96px;flex:none"><span class="cap">Price KD</span><input type="number" min="1" step="0.5" value="${esc(num(sel.target_price))}" data-act="setPrice" data-id="${sel.id}" aria-label="Target price"></label></div>
+          ${spec ? `<div style="margin-top:14px"><h3>Top</h3><p style="margin:0 0 12px">${esc(spec.top)}</p><h3>Pants</h3><p style="margin:0 0 12px">${esc(spec.pants)}</p><h3>Details</h3><p style="margin:0 0 12px">${esc(spec.details)}</p></div>` : ''}
+          <div class="field" style="margin-top:8px"><label for="set-notes">${spec ? 'Your notes for the tailor' : 'Description and notes for the tailor'}</label><textarea id="set-notes" data-act="setNotes" data-id="${sel.id}" placeholder="Fabric, color, changes you want…">${esc(sel.notes || '')}</textarea></div>
+          ${priceBox}
+          <div class="row" style="margin-top:14px"><button class="btn sm" data-act="removeSet" data-id="${sel.id}">Remove from drop</button></div></div></div>`;
+    }
+    return ph('Ramadan drop', `${sets.length} set${sets.length === 1 ? '' : 's'} in the drop · ${ideas.length} idea${ideas.length === 1 ? '' : 's'} on the board`) +
+      `<div class="tabs" role="group" aria-label="Sets" style="overflow-x:auto;flex-wrap:nowrap">${sets.map((x, i) => `<button class="tab" data-act="drop" data-i="${i}" aria-pressed="${x === sel}" style="white-space:nowrap">${esc(x.name.replace(/ set$/, ''))}</button>`).join('')}<button class="tab" data-act="toggleAdd" data-k="set" aria-expanded="${!!(S.ui.add && S.ui.add.set)}" style="white-space:nowrap;color:var(--lavInk)">+ Add set</button></div>
+      ${S.ui.add && S.ui.add.set ? `<div class="form" style="margin-bottom:18px"><div class="field wide"><label for="ns-n">Set name</label><input type="text" id="ns-n" placeholder="e.g. Abaya-style long top set"></div><div class="field"><label for="ns-p">Target price (KD)</label><input type="number" min="1" step="0.5" id="ns-p" value="${num(st.target_min) || 14}"></div><div class="field wide"><label for="ns-d">Description</label><input type="text" id="ns-d" placeholder="Top, pants, details…"></div><button class="btn solid" data-act="addSet">Add to drop</button></div>` : ''}
+      ${detail}
+      ${removed.length ? `<div class="sec"><h3 class="cap" style="margin-bottom:8px">Removed from the drop</h3><div class="row">${removed.map(x => `<span class="pill" style="padding:6px 6px 6px 12px;display:inline-flex;gap:8px;align-items:center">${esc(x.name)}<button class="btn sm" data-act="restoreSet" data-id="${x.id}" style="min-height:28px;padding:2px 10px">Bring back</button><button class="btn sm" data-act="deleteSet" data-id="${x.id}" style="min-height:28px;padding:2px 10px;color:var(--bad)">Delete</button></span>`).join('')}</div></div>` : ''}
+
+      <section class="sec slot" data-slot="drop_idea" style="background:none;padding:0"><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Idea board</h2><span class="cap">${ideas.length ? 'most liked first' : ''}</span></div>
+        <p class="small muted" style="margin:-6px 0 14px">Drop pictures of cuts, colors or details you like. Both of you can like ideas, turn the best into a set, or remove what you don’t want.</p>
+        <label class="drop" style="margin-bottom:16px"><input type="file" accept="image/*" multiple data-act="upload" data-slot="drop_idea" class="sr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v4h16v-4"/></svg><span><b>Drop images</b> or tap to add ideas</span></label>
+        <div class="ideas">${ideas.map(a => { const likes = a.likes || [], mine = likes.some(isMe), url = S.urls[a.path], used = S.d.styles.some(x => x.image_path === a.path);
+          return `<article class="idea">${url ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="${esc(a.name)}" loading="lazy"></a>` : '<div class="idea-ph">Image</div>'}
+            <div class="idea-b"><input type="text" value="${esc(a.note || '')}" placeholder="What do you like about it?" aria-label="Note" data-act="ideaNote" data-id="${esc(a.id)}">
+            <div class="row" style="justify-content:space-between;flex-wrap:nowrap;margin-top:8px"><button class="like ${mine ? 'on' : ''}" data-act="like" data-id="${esc(a.id)}" aria-pressed="${mine}" aria-label="Like">${mine ? '♥' : '♡'} ${likes.length || ''}</button>
+              <span class="small muted">${likes.length ? likes.map(e => isMe(e) ? 'you' : esc(nameOf(e))).join(' & ') : 'by ' + (isMe(a.created_by) ? 'you' : esc(nameOf(a.created_by)))}</span></div>
+            <div class="row" style="margin-top:8px">${used ? '<span class="pill ok">In the drop</span>' : `<button class="btn sm lav" data-act="ideaToSet" data-id="${esc(a.id)}">Make it a set</button>`}<button class="btn sm" data-act="delAsset" data-id="${esc(a.id)}">Remove</button></div></div></article>`; }).join('')}</div></section>
+
+      <div class="grid g2 sec"><div class="card"><h3>Shared across every set</h3><div class="small" style="display:grid;gap:6px"><span>One straight-leg pant pattern for every set, elastic back waist, side pockets.</span><span>Mandarin collar ~3 cm with gold or champagne piping.</span><span>Hidden snaps or flat buttons, nothing that catches on children.</span><span>Pre-washed fabric, overlocked seams, side slits.</span></div></div>
       <div><h3>Size chart (body, cm)</h3><div class="tw"><table style="min-width:0"><thead><tr><th>Size</th><th class="n">Bust</th><th class="n">Waist</th><th class="n">Hip</th></tr></thead><tbody>${sizes.map(z => `<tr><td><b>${z[0]}</b></td><td class="n">${z[1]}</td><td class="n">${z[2]}</td><td class="n">${z[3]}</td></tr>`).join('')}</tbody></table></div></div></div>`;
   }
-  const NAMES = [['Diyafa', 'ضيافة', 'Hospitality'], ['Bait', 'بيت', 'Home'], ['Fanous', 'فانوس', 'Ramadan lantern'], ['Sakina', 'سكينة', 'Calm'], ['Hadaya', 'هدايا', 'Gifts'], ['Noor', 'نور', 'Light'], ['Ghabga', 'غبقة', 'Ramadan night gathering'], ['Qahwa & Co.', 'قهوة', 'Coffee']];
-  function vBrand() {
-    const st = S.d.settings, sl = st.shortlist || {};
-    const pal = [['Cream', '#EFE8DC', 'Main garment colour'], ['Sand', '#D9C8AE', 'Second garment colour'], ['Taupe', '#A89A88', 'Pants, belts, bands'], ['Gold', '#A6814A', 'Piping and thread only'], ['Ink', '#1C1917', 'Type and labels'], ['White', '#FFFFFF', 'Pages and packaging']];
-    return ph('Brand', 'Clean and luxurious: white space, fine detail, one touch of gold.') +
-      `<div class="grid g2"><div class="card" style="background:#1C1917;color:#F6EDE2;border-color:#1C1917;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:240px;text-align:center"><div style="font-family:var(--script);font-size:64px;line-height:.9">${esc(st.brand_name)}</div><div style="letter-spacing:.3em;font-size:12px;color:#CDBBA7;margin-top:10px">RAMADAN · KUWAIT</div><div style="font-family:var(--arabic);font-size:28px;color:#D9C29C;margin-top:10px" dir="rtl" lang="ar">${esc(st.brand_ar)}</div></div>
-      <div class="card" style="display:flex;align-items:center"><p style="font-size:17px;line-height:1.6;margin:0">${esc(st.brand_name)} dresses the women who make a Kuwaiti home run. Clean, modest sets with quiet luxury details, made to be worn all day and priced so every household can dress its whole team well.</p></div></div>
-      <div class="sec"><h2>Choose the name</h2><p class="small muted" style="margin-top:-6px">Both of you can star names. “Use this name” updates it everywhere.</p><div class="grid g4">${NAMES.map(n => { const on = st.brand_name === n[0], stars = Object.entries(sl).filter(([, v]) => (v || []).includes(n[0])).map(([e]) => e);
-        return `<div class="card" style="${on ? 'box-shadow:0 0 0 2px #1C1917 inset' : ''}"><div style="font-family:var(--script);font-size:32px;line-height:1">${esc(n[0])}</div><div style="font-family:var(--arabic);font-size:19px" dir="rtl" lang="ar">${esc(n[1])}</div><div class="small muted">${esc(n[2])}</div><div class="row" style="margin-top:10px"><button class="btn sm ${on ? 'solid' : ''}" data-act="useName" data-n="${esc(n[0])}" data-ar="${esc(n[1])}">${on ? 'In use' : 'Use this name'}</button><button class="btn sm" data-act="star" data-n="${esc(n[0])}" aria-pressed="${stars.some(isMe)}">${stars.some(isMe) ? '★' : '☆'}</button></div>${stars.length ? `<p class="small muted" style="margin:8px 0 0">Starred by ${stars.map(e => isMe(e) ? 'you' : esc(nameOf(e))).join(' and ')}</p>` : ''}</div>`; }).join('')}</div>
-      <div class="form" style="margin-top:12px"><div class="field wide"><label for="cn">Your own name (English)</label><input type="text" id="cn"></div><div class="field"><label for="ca">Arabic</label><input type="text" id="ca" dir="rtl"></div><button class="btn" data-act="customName">Use my name</button></div></div>
-      <div class="sec"><h2>Colours</h2><div class="grid g3">${pal.map(c => `<div class="card row" style="flex-wrap:nowrap"><span style="width:48px;height:48px;border-radius:10px;background:${c[1]};border:1px solid var(--line);flex:none"></span><span><b>${c[0]}</b><span class="small muted" style="display:block">${c[1]} · ${c[2]}</span></span></div>`).join('')}</div></div>
-      <div class="sec"><h2>Type</h2><div class="grid g3"><div class="card"><div style="font-family:var(--script);font-size:40px;line-height:1">Signature</div><p class="small muted">Pinyon Script · the name only</p></div><div class="card"><div style="font-family:var(--serif);font-size:32px;line-height:1.1">Headlines</div><p class="small muted">Cormorant Garamond · titles, packaging</p></div><div class="card"><div style="font-size:18px">Easy to read body text.</div><p class="small muted">Figtree · captions, prices, care labels</p></div></div></div>`;
+  function vStock() {
+    const sets = activeStyles(), stock = S.d.stock || [];
+    const colorsOf = sid => { const c = [...new Set(stock.filter(x => x.style_id === sid).map(x => x.color))]; return c.length ? c : ['Cream']; };
+    const extra = S.ui.colors || {};
+    const total = stock.filter(x => sets.some(st => st.id === x.style_id)).reduce((a, x) => a + Math.max(0, num(x.qty)), 0);
+    const low = stock.filter(x => sets.some(st => st.id === x.style_id) && num(x.qty) <= num(x.low_at || 3)).length;
+    const pending = S.d.orders.filter(o => !['Delivered', 'Cancelled'].includes(o.status));
+    return ph('Inventory', `${total} pieces in stock${low ? ` · ${low} running low` : ''} · ${pending.reduce((a, o) => a + num(o.qty), 0)} sets on open orders`) +
+      `<p class="small muted" style="margin-top:-8px">Type how many you have. Stock goes down automatically when an order is marked <b>Delivered</b> (orders need a size and color).</p>` +
+      sets.map(st => { const cols = [...new Set(colorsOf(st.id).concat(extra[st.id] || []))], sum = stock.filter(x => x.style_id === st.id).reduce((a, x) => a + num(x.qty), 0), want = pending.filter(o => o.style_id === st.id);
+        return `<section class="card sec inv" style="margin-top:16px"><div class="row" style="justify-content:space-between;align-items:baseline"><h3 style="font-size:18px;font-weight:500;margin:0">${esc(st.name)}</h3><span class="cap">${sum} in stock${want.length ? ` · ${want.reduce((a, o) => a + num(o.qty), 0)} ordered` : ''}</span></div>
+          <div class="tw" style="margin-top:12px;background:#fff"><table class="invt"><thead><tr><th>Color</th>${SIZES.map(z => `<th class="n">${z}</th>`).join('')}<th class="n">Total</th></tr></thead><tbody>
+          ${cols.map(c => `<tr><td><b style="font-weight:500">${esc(c)}</b></td>${SIZES.map(z => { const r = stock.find(x => x.style_id === st.id && x.size === z && x.color === c), q = r ? num(r.qty) : 0, lw = r && q <= num(r.low_at || 3); return `<td class="n"><input type="number" inputmode="numeric" min="0" value="${r ? q : ''}" placeholder="0" aria-label="${esc(st.name)} ${z} ${esc(c)}" data-act="stockQty" data-sid="${st.id}" data-size="${z}" data-color="${esc(c)}" class="${r && q <= 0 ? 'out' : lw ? 'low' : ''}"></td>`; }).join('')}<td class="n"><b style="font-weight:600">${stock.filter(x => x.style_id === st.id && x.color === c).reduce((a, x) => a + num(x.qty), 0)}</b></td></tr>`).join('')}
+          </tbody></table></div>
+          <div class="row" style="margin-top:10px;flex-wrap:nowrap"><input type="text" id="nc-${st.id}" placeholder="Add a color, e.g. Taupe" aria-label="New color for ${esc(st.name)}" style="max-width:240px"><button class="btn sm" data-act="addColor" data-sid="${st.id}">Add color</button></div></section>`; }).join('') +
+      `<p class="small muted sec">Red = out of stock, lilac = 3 or fewer left.</p>`;
+  }
+  const SLOTS = [
+    ['logo', 'Main logo', 'The logo you’ll send to tailors, printers and the embroidery shop. PNG or SVG with a transparent background is best.'],
+    ['logo_icon', 'Profile picture / icon', 'The small round version for Instagram, WhatsApp and labels.'],
+    ['palette', 'Color palette', 'Add your colors below, or drop a picture of the palette.'],
+    ['fonts', 'Fonts', 'Font files, or screenshots of the fonts you want.'],
+    ['products', 'Product photos', 'Photos of samples and finished sets.'],
+    ['mood', 'Mood board', 'Inspiration: looks, colors and photos you like.'],
+    ['packaging', 'Packaging & labels', 'Bags, boxes, hang tags, neck and care labels, thank-you cards.'],
+    ['fabric', 'Fabric & trims', 'Fabric swatches, piping, buttons, thread colors.'],
+    ['tailor', 'Sketches & tailor references', 'Sketches, tech packs and reference photos for the tailor.'],
+    ['docs', 'Documents', 'License, quotes, invoices and contracts.']
+  ];
+  const isImg = a => /^image\//.test(a.mime || '');
+  const fsize = b => b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB';
+  function vKit() {
+    const assets = S.d.assets || [], pal = Array.isArray(S.d.settings.palette) ? S.d.settings.palette : [];
+    if (S.noKit && !DEMO) return ph('Brand kit') + '<div class="banner">Run <b>update-2.sql</b> once in Supabase → SQL Editor to switch on file uploads. It’s in the <b>supabase</b> folder.</div>';
+    return ph('Brand kit', 'One shared place for every file you both need. Drop files into the right box. Images preview, other files download.') +
+      `<div class="kit">${SLOTS.map(([id, label, help]) => { const list = assets.filter(a => a.slot === id);
+        return `<section class="slot" data-slot="${id}"><div class="slot-h"><div><h3>${esc(label)}</h3><p class="small muted">${esc(help)}</p></div><span class="cap">${list.length || ''}</span></div>
+          ${id === 'palette' ? `<div class="pal">${pal.map((c, i) => `<div class="pc"><label class="sr" for="pc-${i}">Color ${i + 1}</label><input type="color" id="pc-${i}" value="${esc(c.hex || '#000000')}" data-act="palColor" data-i="${i}"><input type="text" value="${esc(c.name || '')}" placeholder="Name" aria-label="Color name" data-act="palName" data-i="${i}"><button class="x" data-act="palDel" data-i="${i}" aria-label="Remove color">✕</button><span class="hex">${esc((c.hex || '').toUpperCase())}</span></div>`).join('')}<button class="pc add" data-act="palAdd" aria-label="Add a color">+ Add color</button></div>` : ''}
+          <div class="thumbs">${list.map(a => `<figure class="th">${isImg(a) && S.urls[a.path] ? `<a href="${esc(S.urls[a.path])}" target="_blank" rel="noopener"><img src="${esc(S.urls[a.path])}" alt="${esc(a.name)}" loading="lazy"></a>` : `<button class="file" data-act="openFile" data-path="${esc(a.path)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg><span>${esc((a.name.split('.').pop() || 'file').toUpperCase())}</span></button>`}<figcaption><span title="${esc(a.name)}">${esc(a.name)}</span><small>${fsize(num(a.size))} · ${isMe(a.created_by) ? 'you' : esc(nameOf(a.created_by))}</small></figcaption><button class="x thx" data-act="delAsset" data-id="${esc(a.id)}" aria-label="Delete ${esc(a.name)}">✕</button></figure>`).join('')}</div>
+          <label class="drop"><input type="file" multiple data-act="upload" data-slot="${id}" class="sr"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M4 16v4h16v-4"/></svg><span><b>Drop files</b> or tap to choose</span></label></section>`; }).join('')}</div>`;
   }
   function vInstagram() {
-    const st = S.d.settings, handle = '@' + String(st.brand_name).toLowerCase().replace(/[^a-z0-9]+/g, '') + '.kw', posts = S.d.posts, p = posts.find(x => x.position === S.ui.post) || posts[0], weeks = S.d.checklist.filter(c => c.list === 'ig_weeks');
+    const st = S.d.settings, hb = String(st.brand_name).toLowerCase().replace(/[^a-z0-9._]+/g, ''), handle = '@' + (/\.kw$/.test(hb) ? hb : hb + '.kw'), posts = S.d.posts, p = posts.find(x => x.position === S.ui.post) || posts[0], weeks = S.d.checklist.filter(c => c.list === 'ig_weeks');
     const caps = [['Launch', 'رمضان قرب، وبيتج يستاهل أحلى استقبال ✨\nيونيفورمات رمضانية أنيقة ومريحة لفريق بيتج، مع تطريز اسم العائلة.\n\nRamadan is close. Dress your household team for every iftar and ghabga.\nOrder on WhatsApp, link in bio'], ['Product', 'The Tie Top set\nMandarin collar, gold piping, straight pants with side piping.\nSizes S–3XL · family embroidery available\nاطلبي الحين عن طريق الواتساب'], ['Pre-order', 'Pre-orders are open\nLast order date: [DATE]\nHousehold packs of 3 · embroidery included\nالطلب المسبق مفتوح، آخر موعد [DATE]'], ['Exhibition', 'Find us at [EXHIBITION], booth [NO.]\nCome feel the fabric and pick your family’s embroidery.\nتعالوا زورونا في [المعرض]']];
     const tags = ['#رمضان_الكويت #غبقة #يونيفورم #الكويت #ضيافة', '#kuwait #q8 #ramadan2027 #kuwaitbusiness #uniforms', '#ramadanprep #ghabga #modestfashion #kuwaitmoms'];
     const T = S.ui.ig;
@@ -482,27 +665,34 @@ const DROP=[
       (T === 'weeks' ? `<div style="display:flex;flex-direction:column;gap:8px">${weeks.map(w => `<label class="task ${w.done ? 'done' : ''}"><input type="checkbox" data-act="check" data-id="${esc(w.id)}" ${w.done ? 'checked' : ''}><span><span class="tt">${esc(w.title)}</span><span class="small muted" style="display:block">${esc(w.details)}</span></span></label>`).join('')}</div>` : '');
   }
   function vExpos() {
-    const booth = S.d.checklist.filter(c => c.list === 'booth'), bd = booth.filter(b => b.done).length;
-    return ph('Exhibitions', 'Track each Ramadan exhibition from application to booth.') +
-      `<div class="form"><div class="field wide"><label for="x-n">Exhibition</label><input type="text" id="x-n"></div><div class="field"><label for="x-d">Apply by</label><input type="date" id="x-d"></div><div class="field"><label for="x-s">Starts</label><input type="date" id="x-s"></div><div class="field"><label for="x-f">Booth fee (KD)</label><input type="number" min="0" id="x-f"></div><div class="field wide"><label for="x-l">Location</label><input type="text" id="x-l"></div><button class="btn solid" data-act="addExpo">Add exhibition</button></div>
-      <div class="sec">${S.d.expos.length ? `<div class="tw"><table><thead><tr><th>Exhibition</th><th>Location</th><th>Apply by</th><th>Starts</th><th class="n">Fee</th><th>Status</th><th></th></tr></thead><tbody>${S.d.expos.map(x => `<tr><td><b>${esc(x.name)}</b></td><td>${esc(x.location)}</td><td>${day(x.apply_by)}</td><td>${day(x.starts)}</td><td class="n">${kd(x.fee)}</td><td><select aria-label="Status" data-act="expoSt" data-id="${esc(x.id)}">${opt(EXPO_ST, x.status)}</select></td><td><button class="x" data-act="delExpo" data-id="${esc(x.id)}" aria-label="Delete">✕</button></td></tr>`).join('')}</tbody></table></div><p class="small muted">Log booth fees in Expenses as “Exhibition” so they count in prices.</p>` : '<div class="empty">Add the exhibitions you’re considering.</div>'}</div>
-      <div class="sec card"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Booth kit</h2><span class="pill">${bd}/${booth.length}</span></div><div style="display:flex;flex-direction:column;gap:6px;margin-top:12px">${booth.map(b => `<label class="row" style="min-height:40px;flex-wrap:nowrap"><input type="checkbox" data-act="check" data-id="${esc(b.id)}" ${b.done ? 'checked' : ''} style="width:18px;height:18px;accent-color:#1C1917"><span style="${b.done ? 'color:var(--faint);text-decoration:line-through' : ''}">${esc(b.title)}</span></label>`).join('')}</div></div>`;
+    const booth = S.d.checklist.filter(c => c.list === 'booth'), bd = booth.filter(b => b.done).length, t = today();
+    const form = `<div class="form"><div class="field wide"><label for="x-n">Exhibition</label><input type="text" id="x-n"></div><div class="field"><label for="x-d">Apply by</label><input type="date" id="x-d"></div><div class="field"><label for="x-s">Starts</label><input type="date" id="x-s"></div><div class="field"><label for="x-f">Booth fee (KD)</label><input type="number" inputmode="decimal" min="0" id="x-f"></div><div class="field wide"><label for="x-l">Location</label><input type="text" id="x-l"></div><button class="btn solid" data-act="addExpo">Save exhibition</button></div>`;
+    const stCol = { Researching: '#A3A3AD', Applied: '#8B7CF0', Accepted: '#4F7BD9', Paid: '#2F7A4F', Done: '#1E1E21', Rejected: '#C2352B' };
+    return ph('Exhibitions', `${S.d.expos.length} listed · booth kit ${bd}/${booth.length}`) + addBox('expo', 'Add exhibition', form, !S.d.expos.length) +
+      `<div class="split sec" style="margin-top:20px"><div>${S.d.expos.length ? `<div class="clist">${S.d.expos.map(x => { const dl = x.apply_by ? daysBetween(t, x.apply_by) : null; return `<article class="crow ord" style="--sc:${stCol[x.status] || '#A3A3AD'}"><div class="crow-m"><div class="crow-t">${esc(x.name)}</div><div class="crow-s">${esc(x.location || 'Location TBC')}${x.starts ? ' · starts ' + day(x.starts) : ''}</div>${x.apply_by ? `<div class="crow-s" style="${x.status === 'Researching' && dl != null && dl <= 10 ? 'color:var(--bad)' : ''}">Apply by ${day(x.apply_by)}${dl != null && x.status === 'Researching' ? ` · ${dl < 0 ? 'passed' : dl + ' days left'}` : ''}</div>` : ''}<div style="margin-top:10px"><select aria-label="Status" data-act="expoSt" data-id="${esc(x.id)}" class="stsel">${opt(EXPO_ST, x.status)}</select></div></div>
+        <div class="crow-r"><div class="crow-v">${kd(x.fee)}</div><div class="crow-s">booth fee</div><button class="x" data-act="delExpo" data-id="${esc(x.id)}" aria-label="Delete">✕</button></div></article>`; }).join('')}</div><p class="small muted">Log booth fees in Expenses as “Exhibition” so they count in your prices.</p>` : ''}</div>
+      <div><div class="row" style="justify-content:space-between;align-items:baseline"><h2>Booth kit</h2><span class="cap">${bd} of ${booth.length}</span></div><div class="meter" style="margin-bottom:12px"><i style="width:${booth.length ? bd / booth.length * 100 : 0}%;background:#8B7CF0"></i></div>
+        <div class="tlist">${booth.map(b => `<article class="tcard ${b.done ? 'done' : ''}" style="--pc:#8B7CF0;padding:12px 14px;align-items:center"><button class="tcheck" data-act="checkBtn" data-id="${esc(b.id)}" data-done="${b.done ? 1 : 0}" aria-pressed="${!!b.done}" aria-label="${esc(b.title)}" style="width:28px;height:28px;margin:0"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button><div class="tbody"><div class="ttitle" style="margin:0;font-size:15.5px">${esc(b.title)}</div></div></article>`).join('')}</div></div></div>`;
   }
   function vSuppliers() {
-    return ph('Suppliers', 'Tailors, fabric shops, embroiderers and photographers, with quotes side by side.') +
-      `<div class="form"><div class="field wide"><label for="c-n">Name</label><input type="text" id="c-n"></div><div class="field"><label for="c-t">Type</label><select id="c-t">${opt(SUP_TYPES)}</select></div><div class="field"><label for="c-p">Phone / WhatsApp</label><input type="text" id="c-p"></div><div class="field"><label for="c-q">Quote per set (KD)</label><input type="number" min="0" step="0.5" id="c-q"></div><div class="field wide"><label for="c-x">Notes</label><input type="text" id="c-x" placeholder="lead time, minimums…"></div><button class="btn solid" data-act="addSup">Add supplier</button></div>
-      <div class="sec">${S.d.suppliers.length ? `<div class="grid g3">${S.d.suppliers.map(c => `<div class="card"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><div><b>${esc(c.name)}</b><div class="small muted">${esc(c.type)} · added by ${isMe(c.created_by) ? 'you' : esc(nameOf(c.created_by))}</div></div><button class="x" data-act="delSup" data-id="${esc(c.id)}" aria-label="Delete">✕</button></div>${c.phone ? `<p class="small" style="margin:8px 0 0">${esc(c.phone)}</p>` : ''}${num(c.quote) ? `<p style="font-family:var(--serif);font-size:24px;margin:4px 0 0">${kd(c.quote)}<span class="small muted"> / set</span></p>` : ''}${c.notes ? `<p class="small muted" style="margin:4px 0 0">${esc(c.notes)}</p>` : ''}<label class="row" style="margin-top:8px"><input type="checkbox" data-act="chosen" data-id="${esc(c.id)}" ${c.chosen ? 'checked' : ''} style="accent-color:#1C1917"><span class="small">Chosen</span></label></div>`).join('')}</div>` : '<div class="empty">Add the tailors you’re getting quotes from.</div>'}</div>`;
+    const form = `<div class="form"><div class="field wide"><label for="c-n">Name</label><input type="text" id="c-n"></div><div class="field"><label for="c-t">Type</label><select id="c-t">${opt(SUP_TYPES)}</select></div><div class="field"><label for="c-p">Phone / WhatsApp</label><input type="tel" id="c-p" placeholder="e.g. 9XXXXXXX"></div><div class="field"><label for="c-q">Quote per set (KD)</label><input type="number" inputmode="decimal" min="0" step="0.5" id="c-q"></div><div class="field wide"><label for="c-x">Notes</label><input type="text" id="c-x" placeholder="lead time, minimums…"></div><button class="btn solid" data-act="addSup">Save supplier</button></div>`;
+    const types = SUP_TYPES.filter(tp => S.d.suppliers.some(c => c.type === tp));
+    return ph('Suppliers', `${S.d.suppliers.length} saved${S.d.suppliers.some(c => c.chosen) ? ' · ' + S.d.suppliers.filter(c => c.chosen).length + ' chosen' : ''}`) + addBox('sup', 'Add supplier', form, !S.d.suppliers.length) +
+      `<div class="sec" style="margin-top:20px">${types.map(tp => { const list = S.d.suppliers.filter(c => c.type === tp).sort((a, b) => (b.chosen - a.chosen) || (num(a.quote) || 1e9) - (num(b.quote) || 1e9)); return `<h3 class="cap" style="margin:18px 0 8px">${esc(tp)}${list.length > 1 && list.some(c => num(c.quote)) ? ' · cheapest first' : ''}</h3><div class="grid g3">${list.map(c => `<article class="card sup ${c.chosen ? 'chosen' : ''}"><div class="row" style="justify-content:space-between;flex-wrap:nowrap;align-items:flex-start"><div><b>${esc(c.name)}</b>${c.chosen ? ' <span class="pill ok">Chosen</span>' : ''}<div class="small muted">added by ${isMe(c.created_by) ? 'you' : esc(nameOf(c.created_by))}</div></div><button class="x" data-act="delSup" data-id="${esc(c.id)}" aria-label="Delete">✕</button></div>
+        ${num(c.quote) ? `<div class="pv" style="margin-top:10px">${kd(c.quote)}<span class="small muted"> / set</span></div>` : ''}${c.notes ? `<p class="small muted" style="margin:6px 0 0">${esc(c.notes)}</p>` : ''}
+        <div class="row" style="margin-top:12px">${c.phone ? `<a class="btn sm" href="${esc(waLink(c.phone))}" target="_blank" rel="noopener">WhatsApp</a><a class="btn sm" href="tel:${esc(c.phone)}">Call</a>` : ''}<button class="btn sm ${c.chosen ? '' : 'lav'}" data-act="chooseSup" data-id="${esc(c.id)}" data-v="${c.chosen ? 0 : 1}">${c.chosen ? 'Unchoose' : 'Choose'}</button></div></article>`).join('')}</div>`; }).join('')}</div>`;
   }
   function vSettings() {
     const st = S.d.settings;
     const f = (k, label, step, hint, isPct) => `<div class="field"><label for="s-${k}">${label}</label><input type="number" id="s-${k}" step="${step}" data-act="setting" data-k="${k}" ${isPct ? 'data-pct="1"' : ''} value="${esc(isPct ? Math.round(num(st[k]) * 100) : num(st[k]))}">${hint ? `<span class="small muted">${hint}</span>` : ''}</div>`;
     return ph('Settings', 'Shared by both of you. Changes recalculate straight away.') +
-      `<div class="form" style="align-items:start">${f('tasks_per_day', 'Tasks per person per day', '1', 'The daily feed size')}${f('budget', 'Startup budget (KD)', '1')}${f('multiplier', 'Price multiplier', '0.1', 'Price = full cost × this')}${f('round_to', 'Round prices up to (KD)', '0.5')}${f('target_min', 'Target price from (KD)', '1')}${f('target_max', 'Target price to (KD)', '1')}${f('planned_sets', 'Planned sets this drop', '1', 'Overheads are spread over these')}${f('pack_size', 'Household pack size', '1')}${f('pack_discount', 'Pack discount (%)', '1', '', true)}
+      `<div class="form" style="align-items:start;margin-bottom:16px"><div class="field wide"><label for="s-name">Business name</label><input type="text" id="s-name" data-act="settingText" data-k="brand_name" value="${esc(st.brand_name || '')}"></div></div>
+      <div class="form" style="align-items:start">${f('tasks_per_day', 'Tasks per person per day', '1', 'The daily feed size')}${f('budget', 'Startup budget (KD)', '1')}${f('multiplier', 'Price multiplier', '0.1', 'Price = full cost × this')}${f('round_to', 'Round prices up to (KD)', '0.5')}${f('target_min', 'Target price from (KD)', '1')}${f('target_max', 'Target price to (KD)', '1')}${f('planned_sets', 'Planned sets this drop', '1', 'Overheads are spread over these')}${f('pack_size', 'Household pack size', '1')}${f('pack_discount', 'Pack discount (%)', '1', '', true)}
       <label class="row" style="min-height:40px;align-self:center"><input type="checkbox" data-act="incl" ${st.include_overheads ? 'checked' : ''} style="width:18px;height:18px;accent-color:#1C1917"><span>Include overheads in prices</span></label></div>
       <div class="sec card"><h3>Members</h3><p class="small muted" style="margin:0 0 8px">Add or remove people in Supabase → Table Editor → members.</p>${S.d.members.map(m => `<div class="row small" style="min-height:32px">${av(m.email)}${esc(m.name || '')} <span class="muted">${esc(m.email)}</span></div>`).join('')}</div>
       ${DEMO ? '<div class="sec"><button class="btn" data-act="reset">Reset demo data</button></div>' : '<div class="sec"><button class="btn" data-act="signout">Sign out</button></div>'}`;
   }
-  const VIEWS = { today: vToday, team: vTeam, plan: vPlan, money: vMoney, expenses: vExpenses, orders: vOrders, pricing: vPricing, drop: vDrop, brand: vBrand, instagram: vInstagram, expos: vExpos, suppliers: vSuppliers, settings: vSettings };
+  const VIEWS = { today: vToday, team: vTeam, plan: vPlan, money: vMoney, expenses: vExpenses, orders: vOrders, pricing: vPricing, drop: vDrop, kit: vKit, stock: vStock, instagram: vInstagram, expos: vExpos, suppliers: vSuppliers, settings: vSettings };
 
   /* ============================ shell ============================ */
   function navHtml(open) {
@@ -511,25 +701,47 @@ const DROP=[
   function render() {
     if (!S.d) return;
     const st = S.d.settings, open = S.d.todayList.filter(t => !t.done).length;
-    const logo = `<div class="logo"><i aria-hidden="true">${esc(String(st.brand_name || 'D').slice(0, 1).toLowerCase())}</i><div><b>${esc(String(st.brand_name || 'Business HQ').toLowerCase())}</b><small>Business HQ</small></div></div>`;
+    const lg = (S.d.assets || []).find(a => (a.slot === 'logo_icon' || a.slot === 'logo') && /^image\//.test(a.mime) && S.urls && S.urls[a.path]);
+    const logo = `<div class="logo">${lg ? `<img src="${esc(S.urls[lg.path])}" alt="" style="width:34px;height:34px;border-radius:10px;object-fit:cover">` : `<i aria-hidden="true">${esc(String(st.brand_name || 'B').slice(0, 1).toLowerCase())}</i>`}<div><b>${esc(st.brand_name || 'Business HQ')}</b><small>${st.brand_name && st.brand_name !== 'Business HQ' ? 'Business HQ' : 'Ramadan drop'}</small></div></div>`;
     const who = `<div class="big" aria-hidden="true">${esc(nameOf(S.me).slice(0, 1).toUpperCase())}</div><b>${esc(nameOf(S.me))}</b><span>${DEMO ? 'Demo mode' : esc(S.me || '')}</span>${DEMO ? '' : `<span style="text-transform:none;letter-spacing:0"><i class="dot ${S.live ? 'live' : ''}"></i> ${S.live ? 'Live' : 'Connecting'}</span>`}`;
     const y = window.scrollY;
     $app.innerHTML = `<div class="app"><aside>${logo}<nav aria-label="Sections">${navHtml(open)}</nav><div class="who">${who}</div></aside>
-      <div class="wrap"><div class="mob"><div class="top">${logo}<span style="margin-left:auto" class="small muted">${DEMO ? 'Demo' : ''}</span></div><nav aria-label="Sections">${navHtml(open)}</nav></div>
-      <main>${DEMO ? '<div class="banner">Demo mode: saved in this browser only, and you play both roles. Add your Supabase details to <b>config.js</b> to share it with your partner (see README).</div>' : ''}${VIEWS[S.page]()}</main></div></div>`;
+      <div class="wrap"><div class="mob"><div class="top">${logo}<span style="margin-left:auto" class="small muted">${DEMO ? 'Demo' : ''}</span></div></div>
+      <main>${DEMO ? '<div class="banner">Demo mode: saved in this browser only, and you play both roles. Add your Supabase details to <b>config.js</b> to share it with your partner (see README).</div>' : ''}${VIEWS[S.page]()}</main></div></div>
+      <nav class="tabbar" aria-label="Main">${[['today', 'Today', ['today']], ['plan', 'Plan', ['plan']], ['money', 'Money', ['money', 'expenses', 'orders']], ['kit', 'Brand kit', ['kit']]].map(([p, l, grp]) => `<button data-tab="${p}" ${grp.includes(S.page) ? 'aria-current="page"' : ''}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[p]}</svg><span>${l}</span>${p === 'today' && open ? `<em>${open}</em>` : ''}</button>`).join('')}<button data-act="more" aria-expanded="${!!S.ui.more}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg><span>More</span></button></nav>
+      ${S.ui.more ? `<div class="sheet" role="dialog" aria-label="All sections"><div class="sheet-in"><div class="row" style="justify-content:space-between"><h2 style="margin:0">All sections</h2><button class="x" data-act="more" aria-label="Close">✕</button></div>${NAV.map(g => `<div class="cap" style="margin:16px 0 6px">${g[0]}</div><div class="sgrid">${g[1].map(p => `<button data-tab="${p[0]}" ${p[0] === S.page ? 'aria-current="page"' : ''}><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[p[0]] || ''}</svg>${p[1]}</button>`).join('')}</div>`).join('')}</div></div>` : ''}`;
     window.scrollTo(0, y);
     applySearch();
   }
   function applySearch() { const q = (S.q || '').trim().toLowerCase(); document.querySelectorAll('main tbody tr, main .task, main .feed > div, main .note, main .grid > .card').forEach(el => { el.style.display = !q || el.textContent.toLowerCase().includes(q) ? '' : 'none'; }); }
   function renderLogin(msg) {
-    $app.innerHTML = `<div class="auth"><h1>${esc(CFG.BRAND_NAME || 'Business HQ')}</h1><p class="muted">Sign in with your email and we’ll send you a link.</p><div class="form" style="grid-template-columns:1fr;text-align:left;margin-top:22px"><div class="field"><label for="l-email">Email</label><input type="email" id="l-email" autocomplete="email"></div><button class="btn solid" data-act="login">Email me a sign-in link</button></div>${msg ? `<p class="small" style="margin-top:14px">${msg}</p>` : ''}</div>`;
+    $app.innerHTML = `<div class="auth"><h1>${esc(CFG.BRAND_NAME && CFG.BRAND_NAME !== 'Business HQ' ? CFG.BRAND_NAME : 'myuniform.kw')}</h1><p class="muted">Sign in with your email and we’ll send you a link.</p><div class="form" style="grid-template-columns:1fr;text-align:left;margin-top:22px"><div class="field"><label for="l-email">Email</label><input type="email" id="l-email" autocomplete="email"></div><button class="btn solid" data-act="login">Email me a sign-in link</button></div>${msg ? `<p class="small" style="margin-top:14px">${msg}</p>` : ''}</div>`;
   }
   function renderNotMember() { $app.innerHTML = `<div class="auth"><h1>Almost there</h1><p class="muted">${esc(S.me)} isn’t on the members list yet. Add it to the <b>members</b> table in Supabase (see README), then reload.</p><button class="btn" data-act="signout" style="margin-top:16px">Sign out</button></div>`; }
 
+
+  /* in-app dialogs (browser pop-ups are blocked in some views) */
+  function ask(title, fields, okLabel, danger) {
+    return new Promise(resolve => {
+      const prev = document.activeElement, wrap = document.createElement('div');
+      wrap.className = 'modal'; wrap.setAttribute('role', 'dialog'); wrap.setAttribute('aria-modal', 'true'); wrap.setAttribute('aria-label', title);
+      wrap.innerHTML = `<div class="modal-in"><p class="modal-t">${esc(title)}</p>${(fields || []).map((f, i) => `<label class="field" style="margin-top:12px"><span>${esc(f[0])}</span><input type="${f[2] || 'text'}" value="${esc(f[1] || '')}" data-i="${i}"></label>`).join('')}
+        <div class="row" style="justify-content:flex-end;margin-top:18px"><button class="btn" data-m="no">Cancel</button><button class="btn solid" data-m="ok" style="${danger ? 'background:var(--bad);border-color:var(--bad)' : ''}">${esc(okLabel || 'OK')}</button></div></div>`;
+      const done = v => { wrap.remove(); document.removeEventListener('keydown', key, true); if (prev && prev.focus) prev.focus(); resolve(v); };
+      const vals = () => [...wrap.querySelectorAll('input')].map(x => x.value);
+      const key = ev => { if (ev.key === 'Escape') { ev.preventDefault(); done(null); } if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); done(fields && fields.length ? vals() : true); } };
+      wrap.addEventListener('click', ev => { const m = ev.target.closest('[data-m]'); if (ev.target === wrap) done(null); else if (m) done(m.dataset.m === 'ok' ? (fields && fields.length ? vals() : true) : null); ev.stopPropagation(); });
+      document.addEventListener('keydown', key, true);
+      document.body.appendChild(wrap);
+      (wrap.querySelector('input') || wrap.querySelector('[data-m=ok]')).focus();
+    });
+  }
+  const askOk = msg => ask(msg, null, /^Delete|^Clear/.test(msg) ? 'Delete' : /^Remove/.test(msg) ? 'Remove' : 'Yes', /^Delete|^Clear/.test(msg)).then(Boolean);
+
   /* ============================ events ============================ */
   const v = id => { const e = document.getElementById(id); return e ? e.value : ''; };
-  const go = p => { S.page = p; try { history.replaceState(null, '', '#' + p); } catch (_) { } render(); window.scrollTo(0, 0); };
-  document.addEventListener('click', e => {
+  const go = p => { S.ui.more = false; p = ALIAS[p] || p; S.page = p; try { history.replaceState(null, '', '#' + p); } catch (_) { } render(); window.scrollTo(0, 0); };
+  document.addEventListener('click', async e => {
     const tab = e.target.closest('[data-tab]'); if (tab) { go(tab.dataset.tab); return; }
     const g = e.target.closest('[data-go]'); if (g) { go(g.dataset.go); return; }
     const b = e.target.closest('button[data-act]'); if (!b) return;
@@ -537,20 +749,57 @@ const DROP=[
     switch (act) {
       case 'login': { const email = v('l-email').trim(); if (!email) return; b.disabled = true; sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } }).then(r => renderLogin(r.error ? 'Couldn’t send the link: ' + esc(r.error.message) : `Check <b>${esc(email)}</b> for your sign-in link.`)); return; }
       case 'signout': sb.auth.signOut().then(() => location.reload()); return;
-      case 'reset': if (confirm('Clear all demo data?')) { localStorage.removeItem('rd-hq'); refresh({ force: true }); } return;
+      case 'reset': if (await askOk('Clear all demo data?')) { localStorage.removeItem('rd-hq'); refresh({ force: true }); } return;
+      case 'taskToggle': { const was = b.dataset.done === '1'; b.closest('.tcard') && b.closest('.tcard').classList.add(was ? 'undo' : 'pop'); run(API.upd('tasks', id, was ? { done: false, done_by: null, done_at: null } : { done: true, done_by: S.me, done_at: new Date().toISOString() }), was ? 'Reopened' : 'Done ✓', { afterTask: true }); return; }
+      case 'openTask': S.ui.open = S.ui.open === id ? null : id; render(); return;
+      case 'reassign': { const to = b.dataset.to; run(API.upd('tasks', id, { assigned_to: to, scheduled_for: today(), owner: isMe(to) ? null : to }), isMe(to) ? 'Added to your list' : 'Handed to ' + nameOf(to), { afterTask: true }); return; }
+      case 'expoApplied': run(API.upd('expos', id, { status: 'Applied' }), 'Marked as applied'); return;
+      case 'orderStatus': run(API.upd('orders', id, { status: b.dataset.v }), 'Order updated'); return;
+      case 'markPaid': run(API.upd('orders', id, { deposit: num(b.dataset.v) }), 'Marked as paid'); return;
+      case 'palAdd': { const pal = (S.d.settings.palette || []).concat([{ hex: '#D6CDFA', name: '' }]); run(API.settings({ palette: pal })); return; }
+      case 'palDel': { const pal = (S.d.settings.palette || []).filter((_, i) => i !== Number(b.dataset.i)); run(API.settings({ palette: pal })); return; }
+      case 'delAsset': { const a = (S.d.assets || []).find(x => x.id === id); if (a && await askOk('Delete ' + a.name + '?')) run(API.removeAsset(a), 'Deleted'); return; }
+      case 'openFile': { const p = b.dataset.path; API.urls([p]).then(o => { if (o[p]) window.open(o[p], '_blank', 'noopener'); }); return; }
+      case 'more': S.ui.more = !S.ui.more; render(); return;
+      case 'openReview': S.ui.review = true; if (S.page !== 'today') go('today'); else render(); setTimeout(() => { const el = document.getElementById('rv-w'); if (el) { el.focus(); el.scrollIntoView({ block: 'center' }); } }, 50); return;
+      case 'closeReview': S.ui.review = false; render(); return;
+      case 'saveReview': { const ws = weekStart(), goals = [0, 1, 2].map(i => [v('rv-g' + i).trim(), v('rv-o' + i)]).filter(g => g[0]); const ph0 = currentPhase();
+        if (!goals.length && !v('rv-w').trim() && !v('rv-s').trim()) { toast('Add at least one goal.'); return; }
+        S.ui.review = false;
+        run((async () => { const r = await API.ins('weekly_reviews', { week_start: ws, author: S.me, wins: v('rv-w').trim(), stuck: v('rv-s').trim(), goals: goals.map(g => g[0]) }); if (r && r.error && !/duplicate|unique/i.test(r.error.message || '')) return r;
+          for (const [title, owner] of goals) { const mine = owner && isMe(owner); const x = await API.ins('tasks', { phase_id: ph0 ? ph0.id : null, title, details: 'Weekly goal.', sort: 0, kind: 'goal', week_start: ws, owner: owner || null, assigned_to: mine ? S.me : null, scheduled_for: mine ? today() : null }); if (x && x.error) return x; }
+          return {}; })(), 'Week planned'); return; }
+      case 'addColor': { const sid = Number(b.dataset.sid), c = v('nc-' + sid).trim(); if (!c) return; S.ui.colors = S.ui.colors || {}; S.ui.colors[sid] = (S.ui.colors[sid] || []).concat(c); render(); return; }
+      case 'like': { const a = (S.d.assets || []).find(x => x.id === id); if (!a) return; const l = a.likes || [], on = l.some(isMe); run(API.upd('assets', id, { likes: on ? l.filter(e => !isMe(e)) : l.concat(S.me) })); return; }
+      case 'ideaToSet': { const a = (S.d.assets || []).find(x => x.id === id); if (!a) return; const r = await ask('Make it a set', [['Set name', a.note || 'New set', 'text'], ['Target price (KD)', String(num(S.d.settings.target_min) || 14), 'number']], 'Add to drop'); if (!r || !r[0].trim()) return; const name = r[0]; const price = num(r[1]) || num(S.d.settings.target_min) || 14; const sort = Math.max(0, ...S.d.styles.map(x => x.sort || 0)) + 1;
+        S.ui.drop = activeStyles().length; run(API.ins('styles', { name: name.trim(), target_price: price, sort, active: true, image_path: a.path, notes: a.note || '' }), 'Added to the drop'); return; }
+      case 'addSet': { const name = v('ns-n').trim(); if (!name) { toast('Give the set a name.'); return; } const sort = Math.max(0, ...S.d.styles.map(x => x.sort || 0)) + 1; S.ui.add.set = false; S.ui.drop = activeStyles().length;
+        run(API.ins('styles', { name, target_price: num(v('ns-p')) || 14, sort, active: true, notes: v('ns-d').trim() }), 'Set added'); return; }
+      case 'removeSet': if (await askOk('Remove this set from the drop? You can bring it back later.')) { S.ui.drop = 0; run(API.upd('styles', id, { active: false }), 'Removed from the drop'); } return;
+      case 'restoreSet': run(API.upd('styles', id, { active: true }), 'Back in the drop'); return;
+      case 'deleteSet': { const st = S.d.styles.find(x => String(x.id) === String(id)); if (!st) return; const n = S.d.orders.filter(o => String(o.style_id) === String(id)).length;
+        if (n) { toast(`${st.name} has ${n} order${n === 1 ? '' : 's'}, so it can’t be deleted. Keep it removed instead.`); return; }
+        if (!await askOk(`Delete “${st.name}” for good? Its price and notes will be gone. Expenses logged for it stay in your totals.`)) return;
+        const exps = S.d.expenses.filter(e => String(e.style_id) === String(id));
+        run((async () => { for (const e of exps) { const r = await API.upd('expenses', e.id, { scope: 'general', style_id: null }); if (r && r.error) return r; } return API.del('styles', id); })(), 'Set deleted'); return; }
+      case 'toggleAdd': { S.ui.add = S.ui.add || {}; const k = b.dataset.k, cur = b.getAttribute('aria-expanded') === 'true'; S.ui.add[k] = !cur; render(); if (!cur) { const f = document.querySelector('.form input, .form select'); if (f) f.focus(); } return; }
+      case 'feedMore': S.ui.feedN = (S.ui.feedN || 12) + 20; render(); return;
+      case 'checkBtn': run(API.upd('checklist', id, b.dataset.done === '1' ? { done: false, done_by: null, done_at: null } : { done: true, done_by: S.me, done_at: new Date().toISOString() })); return;
+      case 'chooseSup': run(API.upd('suppliers', id, { chosen: b.dataset.v === '1' }), b.dataset.v === '1' ? 'Chosen' : 'Updated'); return;
       case 'snooze': { const tm = new Date(Date.parse(today()) + 864e5).toISOString().slice(0, 10); run(API.upd('tasks', id, { assigned_to: null, scheduled_for: null, snoozed_until: tm }), 'Moved off today’s list', { afterTask: true }); return; }
       case 'addTask': { const t = v('nt-' + b.dataset.ph).trim(); if (!t) return; const n = S.d.tasks.filter(x => x.phase_id === b.dataset.ph).length + 1; run(API.ins('tasks', { phase_id: b.dataset.ph, title: t, sort: n }), 'Task added'); return; }
-      case 'delTask': if (confirm('Delete this task?')) run(API.del('tasks', id), 'Task deleted'); return;
-      case 'feed': S.ui.feed = b.dataset.v; render(); return;
+      case 'delTask': if (await askOk('Delete this task?')) run(API.del('tasks', id), 'Task deleted'); return;
+      case 'feed': S.ui.feed = b.dataset.v; S.ui.feedN = 12; render(); return;
       case 'addExpense': { const cat = v('e-cat'), kind = (S.d.categories.find(c => c.name === cat) || {}).kind, scope = kind === 'overhead' ? 'general' : (v('e-scope') || 'style');
         const r = { spent_on: v('e-date') || today(), category: cat, scope, style_id: scope === 'style' ? Number(v('e-style')) : null, item: v('e-item').trim(), supplier: v('e-sup').trim(), amount: num(v('e-amt')), sets_covered: kind === 'per_set' && num(v('e-sets')) ? Math.round(num(v('e-sets'))) : null };
         if (!r.amount) { toast('Enter the amount paid.'); return; }
-        if (kind === 'per_set' && !r.sets_covered && !confirm('No “sets it covers” entered, so this won’t change prices. Add it anyway?')) return;
-        S.ef = { category: r.category, scope: r.scope, style_id: r.style_id, spent_on: r.spent_on }; run(API.ins('expenses', r), 'Expense added'); return; }
-      case 'delExpense': if (confirm('Delete this expense?')) run(API.del('expenses', id), 'Expense deleted'); return;
-      case 'addOrder': { const r = { ordered_on: v('o-date') || today(), customer: v('o-cust').trim(), channel: v('o-ch'), style_id: Number(v('o-style')), qty: Math.max(1, Math.round(num(v('o-qty')) || 1)), price_charged: num(v('o-price')) || null, discount_pct: num(v('o-disc')), deposit: num(v('o-dep')), embroidery: v('o-emb').trim() };
-        if (!r.customer) { toast('Add the customer’s name.'); return; } r.status = r.deposit > 0 ? 'Deposit paid' : 'New'; S.of = { channel: r.channel, ordered_on: r.ordered_on }; run(API.ins('orders', r), 'Order added'); return; }
-      case 'delOrder': if (confirm('Delete this order?')) run(API.del('orders', id), 'Order deleted'); return;
+        if (kind === 'per_set' && !r.sets_covered && !await askOk('No “sets it covers” entered, so this won’t change prices. Add it anyway?')) return;
+        S.ef = { category: r.category, scope: r.scope, style_id: r.style_id, spent_on: r.spent_on }; S.ui.add = Object.assign(S.ui.add || {}, { exp: false }); run(API.ins('expenses', r), 'Expense added'); return; }
+      case 'delExpense': if (await askOk('Delete this expense?')) run(API.del('expenses', id), 'Expense deleted'); return;
+      case 'addOrder': { const r = { ordered_on: v('o-date') || today(), customer: v('o-cust').trim(), channel: v('o-ch'), style_id: Number(v('o-style')), qty: Math.max(1, Math.round(num(v('o-qty')) || 1)), price_charged: num(v('o-price')) || null, discount_pct: num(v('o-disc')), deposit: num(v('o-dep')), embroidery: v('o-emb').trim(), size: v('o-size'), color: v('o-color').trim() };
+        if (!r.size || !r.color) { r.size = r.size || ''; r.color = r.color || ''; }
+        if (!r.customer) { toast('Add the customer’s name.'); return; } r.status = r.deposit > 0 ? 'Deposit paid' : 'New'; S.of = { channel: r.channel, ordered_on: r.ordered_on }; S.ui.add = Object.assign(S.ui.add || {}, { ord: false }); run(API.ins('orders', r), 'Order added'); return; }
+      case 'delOrder': if (await askOk('Delete this order?')) run(API.del('orders', id), 'Order deleted'); return;
       case 'drop': S.ui.drop = Number(b.dataset.i); render(); return;
       case 'useName': run(API.settings({ brand_name: b.dataset.n, brand_ar: b.dataset.ar }), 'Name updated'); return;
       case 'customName': { const n = v('cn').trim(); if (!n) return; run(API.settings({ brand_name: n, brand_ar: v('ca').trim() || st.brand_ar }), 'Name updated'); return; }
@@ -558,10 +807,10 @@ const DROP=[
       case 'igTab': S.ui.ig = b.dataset.v; render(); return;
       case 'pickPost': S.ui.post = Number(b.dataset.v); render(); return;
       case 'copy': { const t = b.dataset.txt, done = () => { b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1500); }; try { navigator.clipboard.writeText(t).then(done, done); } catch (_) { done(); } return; }
-      case 'addExpo': { const n = v('x-n').trim(); if (!n) return; run(API.ins('expos', { name: n, apply_by: v('x-d') || null, starts: v('x-s') || null, fee: num(v('x-f')), location: v('x-l').trim(), status: 'Researching' }), 'Exhibition added'); return; }
-      case 'delExpo': if (confirm('Delete this exhibition?')) run(API.del('expos', id), 'Deleted'); return;
-      case 'addSup': { const n = v('c-n').trim(); if (!n) return; run(API.ins('suppliers', { name: n, type: v('c-t'), phone: v('c-p').trim(), quote: num(v('c-q')) || null, notes: v('c-x').trim() }), 'Supplier added'); return; }
-      case 'delSup': if (confirm('Delete this supplier?')) run(API.del('suppliers', id), 'Deleted'); return;
+      case 'addExpo': { const n = v('x-n').trim(); if (!n) return; run(API.ins('expos', { name: n, apply_by: v('x-d') || null, starts: v('x-s') || null, fee: num(v('x-f')), location: v('x-l').trim(), status: 'Researching' }), 'Exhibition added'); S.ui.add = Object.assign(S.ui.add || {}, { expo: false }); return; }
+      case 'delExpo': if (await askOk('Delete this exhibition?')) run(API.del('expos', id), 'Deleted'); return;
+      case 'addSup': { const n = v('c-n').trim(); if (!n) return; run(API.ins('suppliers', { name: n, type: v('c-t'), phone: v('c-p').trim(), quote: num(v('c-q')) || null, notes: v('c-x').trim() }), 'Supplier added'); S.ui.add = Object.assign(S.ui.add || {}, { sup: false }); return; }
+      case 'delSup': if (await askOk('Delete this supplier?')) run(API.del('suppliers', id), 'Deleted'); return;
     }
   });
   document.addEventListener('change', e => {
@@ -570,6 +819,9 @@ const DROP=[
     if (!act) return; const id = el.dataset.id;
     const doneP = c => c ? { done: true, done_by: S.me, done_at: new Date().toISOString() } : { done: false, done_by: null, done_at: null };
     switch (act) {
+      case 'upload': { const files = [...(el.files || [])]; if (files.length) uploadFiles(el.dataset.slot, files); break; }
+      case 'palColor': { const pal = (S.d.settings.palette || []).map((c, i) => i === Number(el.dataset.i) ? Object.assign({}, c, { hex: el.value }) : c); run(API.settings({ palette: pal })); break; }
+      case 'palName': { const pal = (S.d.settings.palette || []).map((c, i) => i === Number(el.dataset.i) ? Object.assign({}, c, { name: el.value }) : c); run(API.settings({ palette: pal })); break; }
       case 'taskDone': run(API.upd('tasks', id, doneP(el.checked)), el.checked ? 'Done' : 'Reopened', { afterTask: true }); break;
       case 'planDone': run(API.upd('tasks', id, doneP(el.checked)), el.checked ? 'Done' : 'Reopened', { afterTask: true }); break;
       case 'owner': run(API.upd('tasks', id, { owner: el.value || null }), 'Saved'); break;
@@ -578,6 +830,11 @@ const DROP=[
       case 'override': run(API.override(Number(id), num(el.value)), num(el.value) ? 'Price set' : 'Back to automatic price'); break;
       case 'setting': { let val = num(el.value); if (el.dataset.pct) val = val / 100; run(API.settings({ [el.dataset.k]: val }), 'Settings saved'); break; }
       case 'incl': run(API.settings({ include_overheads: el.checked }), 'Settings saved'); break;
+      case 'ideaNote': run(API.upd('assets', id, { note: el.value.trim() })); break;
+      case 'setNotes': run(API.upd('styles', id, { notes: el.value })); break;
+      case 'setPrice': run(API.upd('styles', id, { target_price: num(el.value) || 1 }), 'Price saved'); break;
+      case 'stockQty': run(API.setStock(Number(el.dataset.sid), el.dataset.size, el.dataset.color, Math.max(0, Math.round(num(el.value)))), 'Stock saved'); break;
+      case 'settingText': run(API.settings({ [el.dataset.k]: el.value.trim() }), 'Saved'); break;
       case 'post': run(API.upd('ig_posts', id, { [el.dataset.k]: el.value || (el.dataset.k === 'post_date' ? null : '') }), 'Saved'); break;
       case 'bio': run(API.settings({ ig_bio: el.value }), 'Bio saved'); break;
       case 'check': run(API.upd('checklist', id, el.checked ? { done: true, done_by: S.me, done_at: new Date().toISOString() } : { done: false, done_by: null, done_at: null })); break;
@@ -586,6 +843,14 @@ const DROP=[
     }
   });
   document.addEventListener('input', e => { if (e.target.id === 'q') { S.q = e.target.value; applySearch(); } });
+  async function uploadFiles(slot, files) {
+    toast(`Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`);
+    let ok = 0; for (const f of files) { try { const r = await API.upload(slot, f); if (r && r.error) toast('Not uploaded: ' + r.error.message); else ok++; } catch (e) { toast('Upload failed'); } }
+    if (ok) toast(`${ok} file${ok === 1 ? '' : 's'} added`); await refresh({ force: true });
+  }
+  document.addEventListener('dragover', e => { const z = e.target.closest && e.target.closest('.slot'); if (z) { e.preventDefault(); z.classList.add('over'); } });
+  document.addEventListener('dragleave', e => { const z = e.target.closest && e.target.closest('.slot'); if (z && !z.contains(e.relatedTarget)) z.classList.remove('over'); });
+  document.addEventListener('drop', e => { const z = e.target.closest && e.target.closest('.slot'); if (!z) return; e.preventDefault(); z.classList.remove('over'); const files = [...(e.dataTransfer.files || [])]; if (files.length) uploadFiles(z.dataset.slot, files); });
   document.addEventListener('focusout', () => setTimeout(() => { const a = document.activeElement; if (S.dirty && !(a && a.closest && a.closest('.form'))) { S.dirty = false; render(); } }, 0));
   document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'l-email') document.querySelector('[data-act="login"]').click(); if (e.key === 'Enter' && e.target.id && e.target.id.startsWith('nt-')) { const btn = e.target.parentNode.querySelector('[data-act="addTask"]'); if (btn) btn.click(); } });
 
